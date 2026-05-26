@@ -207,15 +207,32 @@ _RAW_UCI_RE = re.compile(
     re.VERBOSE,
 )
 
+# SAN-like token: piece letter (KQRBN) or file (a-h) followed by square/action,
+# or castling notation. 2-6 chars, uppercase or lowercase.
+_SAN_TOKEN_RE = re.compile(
+    r"""
+    \b(                           # word boundary
+      [KQRBNkqrbn]?[a-h]?[1-8]?   # optional piece + optional file + optional rank
+      x?                           # optional capture marker
+      [a-h][1-8]                   # target square (file+rank)
+      (?:=[QRBNqrbn])?             # optional promotion
+      [+#]?                        # optional check/checkmate
+    )\b
+    |
+    \b([O0]-[O0](-[O0])?)\b        # castling: O-O or O-O-O
+    """,
+    re.VERBOSE,
+)
 
-def _extract_move_uci(text: str, board: chess.Board) -> Optional[str]:
-    """Extract a UCI move from free-text LLM output. Returns None if none found."""
-    # First, try the explicit MOVE: marker
+
+def _extract_move(text: str, board: chess.Board) -> Optional[str]:
+    """Extract a move (UCI or SAN) from free-text LLM output. Returns UCI string or None."""
+    # 1. Try the explicit MOVE: marker (UCI format)
     m = _MOVE_RE.search(text)
     if m:
         return m.group(1)
 
-    # Fallback: find any UCI-like token that is legal
+    # 2. Find any UCI-like token that is legal
     candidates = _RAW_UCI_RE.findall(text)
     for uci in candidates:
         try:
@@ -224,6 +241,21 @@ def _extract_move_uci(text: str, board: chess.Board) -> Optional[str]:
                 return uci
         except ValueError:
             continue
+
+    # 3. Try SAN tokens — strip markdown bold/italic/code, split into words
+    clean = re.sub(r'[*_`~]', ' ', text)
+    tokens = clean.split()
+    for token in tokens:
+        token = token.strip(',.!?:;"\')]}>')
+        if len(token) < 2 or len(token) > 8:
+            continue
+        try:
+            move = board.parse_san(token)
+            if move in board.legal_moves:
+                return move.uci()
+        except ValueError:
+            continue
+
     return None
 
 
@@ -474,7 +506,7 @@ class LLMPlayer:
                 if tc["name"] == "make_move":
                     proposed_uci = tc["arguments"].get("move", "").strip()
             else:
-                proposed_uci = _extract_move_uci(content, board)
+                proposed_uci = _extract_move(content, board)
 
             if not proposed_uci:
                 # Escalating urgency — by attempt 3 we just demand the UCI
