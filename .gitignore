@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Game outputs
+games/*.pgn
+.logs/*.txt
+
+# Hermes agent
+.hermes/
+
+# OS
+.DS_Store

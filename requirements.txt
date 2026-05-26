@@ -1,0 +1,5 @@
+chess>=1.11
+litellm>=1.80
+openai>=2.0
+botocore>=1.30
+stockfish>=5.0

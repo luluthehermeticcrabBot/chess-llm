@@ -1,0 +1,20 @@
+[project]
+name = "chess-llm"
+version = "0.1.0"
+description = "Pit LLMs, humans, and Stockfish against each other in chess"
+requires-python = ">=3.11"
+dependencies = [
+    "chess>=1.11",
+    "litellm>=1.80",
+    "openai>=2.0",
+    "botocore>=1.30",
+]
+
+[project.scripts]
+chess-llm = "chess_llm:main"
+
+[project.optional-dependencies]
+stockfish = ["stockfish>=5.0"]
+
+[tool.uv]
+dev-dependencies = []
