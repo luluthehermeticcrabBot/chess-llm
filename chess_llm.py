@@ -53,6 +53,7 @@ DEBUG = (
 #   opencode-zen/model→ https://opencode.ai/zen/v1          OPENCODE_ZEN_API_KEY
 #   openrouter/model  → https://openrouter.ai/api/v1        OPENROUTER_API_KEY
 #   openai/model      → https://api.openai.com/v1           OPENAI_API_KEY
+#   ollama/model      → http://localhost:11434/v1           (no key — routes via OpenAI compat endpoint)
 #   anthropic/model   → (native litellm, no override needed) ANTHROPIC_API_KEY
 
 PROVIDER_PRESETS: dict[str, tuple[str, str]] = {
@@ -60,6 +61,10 @@ PROVIDER_PRESETS: dict[str, tuple[str, str]] = {
     "opencode-zen": ("https://opencode.ai/zen/v1",    "OPENCODE_ZEN_API_KEY"),
     "openrouter":   ("https://openrouter.ai/api/v1",  "OPENROUTER_API_KEY"),
     "openai":       ("https://api.openai.com/v1",     "OPENAI_API_KEY"),
+    # ollama routes through its OpenAI-compatible /v1 endpoint instead of
+    # litellm's native ollama/ handler, which has known bugs with tool calling
+    # (see https://github.com/BerriAI/litellm/issues/13823, #24091, #7570).
+    "ollama":       ("http://localhost:11434/v1",     None),
 }
 
 
@@ -73,13 +78,20 @@ def _resolve_provider(model: str) -> tuple[str, str | None, str | None]:
     The returned litellm_model strips the prefix for OpenAI-compatible
     endpoints, or keeps it for providers litellm knows natively (openrouter).
 
-    For unrecognised prefixes (anthropic/, groq/, ollama/ etc.) we leave
+    For unrecognised prefixes (anthropic/, groq/ etc.) we leave
     api_base + api_key as None and let litellm use its defaults.
+    ollama/ is handled as a known prefix — it routes through Ollama's
+    OpenAI-compatible /v1 endpoint to avoid litellm's broken native handler.
     """
     for prefix, (base_url, key_env) in PROVIDER_PRESETS.items():
         if model.startswith(prefix + "/"):
             model_name = model[len(prefix) + 1:]  # e.g. "deepseek-v4-pro"
-            api_key = os.environ.get(key_env)
+            # key_env is None for ollama (no real API key needed)
+            api_key = os.environ.get(key_env) if key_env else None
+            # Ollama's /v1 endpoint requires a non-empty API key; "ollama" is
+            # the conventional dummy value (the server ignores it).
+            if prefix == "ollama":
+                api_key = "ollama"
             # openrouter is known to litellm natively — keep the prefix
             if prefix == "openrouter":
                 return model, base_url, api_key
