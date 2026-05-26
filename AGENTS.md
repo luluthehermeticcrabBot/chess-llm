@@ -57,6 +57,7 @@ LLM_CHESS_DEBUG=1 python chess_llm.py --white random --black random --delay 0
 ## Common issues
 
 - **Ollama models**: `ollama/` routes through Ollama's OpenAI-compatible `/v1` endpoint (not litellm's native handler, which has [known tool-calling bugs](https://github.com/BerriAI/litellm/issues/13823)). The model must be pulled (`ollama pull gpt-oss:20b`) and the Ollama server must be running. The default base URL is `http://localhost:11434/v1`; override with `--api-base` if needed.
+- **Docker Model Runner**: `docker/` routes through DMR's OpenAI-compatible `/engines/v1` endpoint (port 12434). Models use the `ai/` namespace — e.g. `docker/ai/ministral3:3B-Q4_K_M`. Default context is 4K tokens for llama.cpp GGUF models; increase with `docker model configure --ctx-size 8192 ai/model-name` before running chess games.
 - **Ollama context window**: Some models default to 2K tokens — too small for the growing chess prompt (FEN + legal moves + PGN history + tool defs). Increase with `ollama run` or create a Modelfile with `PARAMETER num_ctx 8192`. If the model goes silent mid-game, context overflow is the likely cause.
 - **Stockfish timeout**: Startup can take >10s on cold systems. The default popen timeout is 30s.
 - **Model returns no move**: Small models often reason endlessly without outputting a UCI move. Try `--no-tools` or increase `--retries`.

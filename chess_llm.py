@@ -54,6 +54,7 @@ DEBUG = (
 #   openrouter/model  → https://openrouter.ai/api/v1        OPENROUTER_API_KEY
 #   openai/model      → https://api.openai.com/v1           OPENAI_API_KEY
 #   ollama/model      → http://localhost:11434/v1           (no key — routes via OpenAI compat endpoint)
+#   docker/model      → http://localhost:12434/engines/v1   (no key — Docker Model Runner)
 #   anthropic/model   → (native litellm, no override needed) ANTHROPIC_API_KEY
 
 PROVIDER_PRESETS: dict[str, tuple[str, str]] = {
@@ -65,6 +66,10 @@ PROVIDER_PRESETS: dict[str, tuple[str, str]] = {
     # litellm's native ollama/ handler, which has known bugs with tool calling
     # (see https://github.com/BerriAI/litellm/issues/13823, #24091, #7570).
     "ollama":       ("http://localhost:11434/v1",     None),
+    # Docker Model Runner (DMR) — OpenAI-compatible at /engines/v1.
+    # Uses llama.cpp under the hood for GGUF models, vLLM for safetensors.
+    # Port 12434, no real API key needed.
+    "docker":       ("http://localhost:12434/engines/v1", None),
 }
 
 
@@ -92,6 +97,9 @@ def _resolve_provider(model: str) -> tuple[str, str | None, str | None]:
             # the conventional dummy value (the server ignores it).
             if prefix == "ollama":
                 api_key = "ollama"
+            # Docker Model Runner accepts any API key; "not-needed" is canonical.
+            if prefix == "docker":
+                api_key = "not-needed"
             # openrouter is known to litellm natively — keep the prefix
             if prefix == "openrouter":
                 return model, base_url, api_key
