@@ -200,6 +200,16 @@ _MOVE_RE = re.compile(
     re.VERBOSE | re.IGNORECASE,
 )
 
+# "make_move X" or "my move: X" — models often use function-call-style
+# or natural-language phrasing instead of the formal MOVE: prefix.
+_MOVE_CMD_RE = re.compile(
+    r"""
+    (?:make_move|my\s+move)\s*:?\s+   # "make_move", "make_move:", "my move:"
+    ([^\s,.;!?]+)                       # capture the next token (move notation)
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
 _RAW_UCI_RE = re.compile(
     r"""
     \b([a-h][1-8][a-h][1-8][qrbn]?)\b
@@ -227,10 +237,28 @@ _SAN_TOKEN_RE = re.compile(
 
 def _extract_move(text: str, board: chess.Board) -> Optional[str]:
     """Extract a move (UCI or SAN) from free-text LLM output. Returns UCI string or None."""
-    # 1. Try the explicit MOVE: marker (UCI format)
+    # 1a. Try the explicit MOVE: marker (UCI format)
     m = _MOVE_RE.search(text)
     if m:
         return m.group(1)
+
+    # 1b. Try "make_move d6" or "my move: Nf6" style
+    m = _MOVE_CMD_RE.search(text)
+    if m:
+        token = m.group(1).strip(',.!?:;"\')]}>')
+        # Try SAN first, then UCI
+        try:
+            move = board.parse_san(token)
+            if move in board.legal_moves:
+                return move.uci()
+        except ValueError:
+            pass
+        try:
+            move = board.parse_uci(token.lower())
+            if move in board.legal_moves:
+                return token.lower()
+        except ValueError:
+            pass
 
     # 2. Find any UCI-like token that is legal
     candidates = _RAW_UCI_RE.findall(text)
@@ -242,10 +270,12 @@ def _extract_move(text: str, board: chess.Board) -> Optional[str]:
         except ValueError:
             continue
 
-    # 3. Try SAN tokens — strip markdown bold/italic/code, split into words
+    # 3. Try SAN tokens — scan from the END of the text backwards,
+    #    since models typically put the actual move near the end.
+    #    Strip markdown formatting first.
     clean = re.sub(r'[*_`~]', ' ', text)
     tokens = clean.split()
-    for token in tokens:
+    for token in reversed(tokens):  # <-- reversed: prefer tokens near the end
         token = token.strip(',.!?:;"\')]}>')
         if len(token) < 2 or len(token) > 8:
             continue
