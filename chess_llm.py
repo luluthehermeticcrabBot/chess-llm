@@ -38,6 +38,9 @@ from typing import Optional
 import chess
 import chess.pgn
 
+# Save real stderr before we possibly replace it (litellm spam suppression)
+_REAL_STDERR = sys.stderr
+
 # Debug mode: set LLM_CHESS_DEBUG=1 (or DEBUG_CHESS_LLM=1) to see model responses
 DEBUG = (
     os.environ.get("LLM_CHESS_DEBUG", "") == "1"
@@ -87,6 +90,20 @@ def _resolve_provider(model: str) -> tuple[str, str | None, str | None]:
     return model, None, None
 
 
+# ── Silence litellm's stderr spam once at module load ────────────────────────
+# litellm writes "Provider List: https://...", "Give Feedback / Get Help", etc.
+# to stderr on every error. We redirect stderr to /dev/null globally unless
+# LLM_CHESS_DEBUG=1 (or DEBUG_CHESS_LLM=1).
+if not DEBUG:
+    import logging
+    logging.getLogger("litellm").setLevel(logging.CRITICAL)
+    logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
+    # Redirect stderr to /dev/null for the lifetime of the process.
+    # The --log tee in main() replaces sys.stderr again after this,
+    # so stderr still ends up in the log file (just without litellm noise).
+    _litellm_devnull = open(os.devnull, "w")
+    sys.stderr = _litellm_devnull
+
 # ── LLM interface ────────────────────────────────────────────────────────────
 
 def _call_llm(
@@ -103,6 +120,10 @@ def _call_llm(
     """Thin wrapper around litellm. Returns {'content': str, 'tool_calls': [...]}."""
     import litellm
 
+    # Quiet litellm (redundant with module-level, but belt-and-suspenders)
+    litellm.suppress_debug_info = True
+    litellm.set_verbose = False
+
     # Resolve provider preset → overrides base_url / key if applicable
     resolved_model, preset_base, preset_key = _resolve_provider(model)
     effective_base = api_base or preset_base
@@ -117,39 +138,24 @@ def _call_llm(
         model=resolved_model,
         messages=[{"role": "system", "content": system}] + messages,
         temperature=temperature,
-        max_tokens=max_tokens or (2048 if tools else 4096),  # text mode needs room
+        max_tokens=max_tokens or (2048 if tools else 4096),
         timeout=timeout,
     )
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
 
-    # Suppress litellm's noisy stderr output
-    _stderr_backup = None
-    if not DEBUG:
-        litellm.suppress_debug_info = True
-        litellm.set_verbose = False
-        import logging
-        logging.getLogger("litellm").setLevel(logging.CRITICAL)
-        logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
-        _stderr_backup = sys.stderr
-        sys.stderr = open(os.devnull, "w")
-
-    try:
-        # Hard timeout via thread — litellm's timeout is unreliable for some providers
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(litellm.completion, **kwargs)
-            response = future.result(timeout=timeout + 10)  # 10s grace beyond litellm's own timeout
-    except concurrent.futures.TimeoutError:
-        raise TimeoutError(
-            f"No response from {resolved_model} after {timeout + 10}s. "
-            f"Is the provider running? For Ollama, check: ollama ps"
-        )
-    finally:
-        if _stderr_backup is not None:
-            sys.stderr.close()
-            sys.stderr = _stderr_backup
+    # Hard timeout via thread — litellm's timeout is unreliable for some providers
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(litellm.completion, **kwargs)
+        try:
+            response = future.result(timeout=timeout + 10)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(
+                f"No response from {resolved_model} after {timeout + 10}s. "
+                f"Is the provider running? For Ollama, check: ollama ps"
+            )
     choice = response.choices[0].message
 
     result = {"content": choice.content or ""}
@@ -897,7 +903,6 @@ def main():
             args.log = os.path.join(log_dir, f"game_{ts}.txt")
         _log_file = open(args.log, "w", buffering=1)  # line-buffered
         _original_stdout = sys.stdout
-        _original_stderr = sys.stderr
         class _Tee:
             def write(self, data):
                 _original_stdout.write(data)
@@ -907,10 +912,10 @@ def main():
                 _log_file.flush()
         class _TeeStderr:
             def write(self, data):
-                _original_stderr.write(data)
+                _REAL_STDERR.write(data)
                 _log_file.write(data)
             def flush(self):
-                _original_stderr.flush()
+                _REAL_STDERR.flush()
                 _log_file.flush()
         sys.stdout = _Tee()
         sys.stderr = _TeeStderr()

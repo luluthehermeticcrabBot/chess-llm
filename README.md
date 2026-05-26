@@ -107,6 +107,21 @@ LLM thinks → calls make_move(uci) → python-chess validates:
 
 **Pre-flight check:** before the match starts, each LLM player sends a tiny probe to validate connectivity.
 
+## Custom endpoints (Requesty, local proxies, etc.)
+
+Any OpenAI-compatible endpoint works via `--api-base` + `--api-key`:
+
+```bash
+# e.g. Requesty or any proxy that speaks the OpenAI chat completions API
+python chess_llm.py \
+  -w stockfish \
+  -b openai/some-model \
+  --api-base https://your-proxy.com/v1 \
+  --api-key sk-...
+```
+
+The `openai/` prefix tells litellm to use the OpenAI-compatible handler. Pair with any `--api-base` URL.
+
 ## Project files
 
 ```
