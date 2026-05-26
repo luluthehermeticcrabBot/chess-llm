@@ -310,7 +310,9 @@ class LLMPlayer:
         if base:
             print(f"   🔗 {self.name}: connecting to {base} ...", flush=True)
 
-        # A tiny request just to validate connectivity
+        # A tiny request just to validate connectivity.
+        # Use the full player timeout — local models (especially on AMD GPUs)
+        # can take 60-90s to produce their first token from a cold start.
         try:
             _call_llm(
                 model=self.model,
@@ -318,7 +320,7 @@ class LLMPlayer:
                 messages=[],
                 temperature=0,
                 max_tokens=5,
-                timeout=max(15, self.timeout // 4),
+                timeout=self.timeout,
                 api_base=self.api_base,
                 api_key=self.api_key,
             )
