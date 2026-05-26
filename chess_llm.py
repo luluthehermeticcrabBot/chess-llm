@@ -141,17 +141,14 @@ def _call_llm(
     effective_base = api_base or preset_base
     effective_key = api_key or preset_key
 
-    if effective_base:
-        litellm.api_base = effective_base
-    if effective_key:
-        litellm.api_key = effective_key
-
     kwargs = dict(
         model=resolved_model,
         messages=[{"role": "system", "content": system}] + messages,
         temperature=temperature,
         max_tokens=max_tokens or (2048 if tools else 4096),
         timeout=timeout,
+        api_base=effective_base,
+        api_key=effective_key,
     )
     if tools:
         kwargs["tools"] = tools
