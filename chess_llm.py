@@ -92,6 +92,7 @@ def _call_llm(
     api_base: str | None = None,
     api_key: str | None = None,
     timeout: int = 120,
+    max_tokens: int | None = None,
 ) -> dict:
     """Thin wrapper around litellm. Returns {'content': str, 'tool_calls': [...]}."""
     import litellm
@@ -110,7 +111,7 @@ def _call_llm(
         model=resolved_model,
         messages=[{"role": "system", "content": system}] + messages,
         temperature=temperature,
-        max_tokens=2048 if tools else 4096,  # text mode needs room for reasoning + move
+        max_tokens=max_tokens or (2048 if tools else 4096),  # text mode needs room
         timeout=timeout,
     )
     if tools:
