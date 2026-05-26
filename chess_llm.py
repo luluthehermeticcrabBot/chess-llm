@@ -543,19 +543,39 @@ class RandomPlayer:
 class StockfishPlayer:
     """Plays using the Stockfish chess engine."""
 
+    # Common install locations checked in order when no path is given
+    _KNOWN_PATHS = [
+        "stockfish",                                    # in PATH
+        "/usr/games/stockfish",                         # Debian/Ubuntu apt
+        "/usr/bin/stockfish",                           # some distros
+        "/usr/local/bin/stockfish",                     # manual install
+        os.path.expanduser("~/.local/bin/stockfish"),   # pip/user install
+    ]
+
     def __init__(
         self,
         name: str = "Stockfish",
         skill_level: int = 20,
         think_time: float = 0.1,
-        binary_path: str = "stockfish",
+        binary_path: str | None = None,
     ):
         self.name = name
         self.skill_level = skill_level
         self.think_time = think_time
-        self.binary_path = binary_path or os.environ.get("STOCKFISH_PATH", "stockfish")
+        self.binary_path = binary_path or self._find_binary()
         self.illegal_count = 0
         self._engine = None
+
+    @classmethod
+    def _find_binary(cls) -> str:
+        """Find the stockfish binary, trying PATH and known locations."""
+        import shutil
+        for path in cls._KNOWN_PATHS:
+            if shutil.which(path):
+                return path
+        raise FileNotFoundError(
+            "stockfish not found. Install it (apt install stockfish) or pass --stockfish-path"
+        )
 
     def _get_engine(self):
         if self._engine is None:
@@ -835,8 +855,8 @@ def main():
         help="Stockfish think time in seconds (default: 0.1)",
     )
     parser.add_argument(
-        "--stockfish-path", default="/home/hermes/.local/bin/stockfish",
-        help="Path to stockfish binary (default: /home/hermes/.local/bin/stockfish)",
+        "--stockfish-path", default=None,
+        help="Path to stockfish binary (default: auto-detect from PATH or common locations)",
     )
     parser.add_argument(
         "--api-base",
