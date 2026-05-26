@@ -1001,7 +1001,28 @@ def main():
         help="Tee output to a log file in .logs/ (auto-names by date; or give a path)",
     )
 
+    # ── ELO / tournament ────────────────────────────────────────────
+    parser.add_argument(
+        "--elo", action="store_true",
+        help="Track ELO ratings (saved to ratings.json after each game)",
+    )
+    parser.add_argument(
+        "--elo-db", default="ratings.json",
+        help="Path to ELO ratings database (default: ratings.json)",
+    )
+    parser.add_argument(
+        "--leaderboard", "-L", action="store_true",
+        help="Show the ELO leaderboard and exit",
+    )
+
     args = parser.parse_args()
+
+    # ── Leaderboard (standalone, no game played) ─────────────────────
+    if args.leaderboard:
+        from elo import EloTracker
+        tracker = EloTracker(args.elo_db)
+        tracker.print_leaderboard()
+        return
 
     # ── Tee output to log file ──────────────────────────────────────────
     _log_file = None
@@ -1087,6 +1108,40 @@ def main():
         pgn_path = f"games/{ts}_{w_name}_vs_{b_name}.pgn"
     match.save_pgn(pgn_path)
     match.print_stats()
+
+    # ── ELO tracking ─────────────────────────────────────────────────
+    if args.elo:
+        from elo import EloTracker
+        tracker = EloTracker(args.elo_db)
+
+        def _elo_id(player) -> str:
+            """Extract a clean ELO ID from a player instance."""
+            if hasattr(player, "model"):
+                return player.model  # LLMPlayer: use the raw model string
+            name = player.name
+            # Strip color suffix: "Stockfish 20 (White)" → "Stockfish 20"
+            if " (" in name:
+                name = name[: name.rindex(" (")]
+            return name
+
+        w_id = _elo_id(white)
+        b_id = _elo_id(black)
+        w_old = tracker.get(w_id)["rating"]
+        b_old = tracker.get(b_id)["rating"]
+        updated = tracker.update(w_id, b_id, result)
+
+        w_new = updated["white"]["rating"]
+        b_new = updated["black"]["rating"]
+
+        w_delta = w_new - w_old
+        b_delta = b_new - b_old
+        w_sign = "+" if w_delta >= 0 else ""
+        b_sign = "+" if b_delta >= 0 else ""
+
+        print(f"\n📊 ELO updated → {args.elo_db}")
+        print(f"   {w_id}: {w_old} → {w_new} ({w_sign}{w_delta})")
+        print(f"   {b_id}: {b_old} → {b_new} ({b_sign}{b_delta})")
+        print(f"   Use -L to see full leaderboard")
 
     return result
 
