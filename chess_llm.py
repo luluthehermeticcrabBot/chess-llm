@@ -149,9 +149,18 @@ def _call_llm(
     effective_base = api_base or preset_base
     effective_key = api_key or preset_key
 
+    # Build the full message list. Some models (Qwen3.5, etc.) have strict
+    # Jinja chat templates that require at least one user message after the
+    # system prompt. If messages is empty, add a minimal placeholder.
+    full_messages = [{"role": "system", "content": system}]
+    if messages:
+        full_messages.extend(messages)
+    else:
+        full_messages.append({"role": "user", "content": "Continue."})
+
     kwargs = dict(
         model=resolved_model,
-        messages=[{"role": "system", "content": system}] + messages,
+        messages=full_messages,
         temperature=temperature,
         max_tokens=max_tokens or (2048 if tools else 4096),
         timeout=timeout,
