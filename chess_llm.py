@@ -227,15 +227,20 @@ def _extract_move_uci(text: str, board: chess.Board) -> Optional[str]:
     return None
 
 
-def _explain_illegal(board: chess.Board, uci: str) -> str:
-    """Give a human-readable explanation of why a UCI move is illegal."""
+def _explain_illegal(board: chess.Board, move_str: str) -> str:
+    """Give a human-readable explanation of why a move is illegal (accepts SAN or UCI)."""
+    # Try SAN first, then UCI (case-insensitive)
+    move = None
     try:
-        move = board.parse_uci(uci)
+        move = board.parse_san(move_str)
     except ValueError:
-        return (
-            f"'{uci}' is not valid UCI notation. "
-            f"Use format like e2e4, g1f3, e7e8q (for promotion)."
-        )
+        try:
+            move = board.parse_uci(move_str.lower())
+        except ValueError:
+            return (
+                f"'{move_str}' is not valid chess notation. "
+                f"Use UCI like e2e4 or SAN like Nf3."
+            )
 
     from_sq = chess.square_name(move.from_square)
     to_sq = chess.square_name(move.to_square)
@@ -252,7 +257,7 @@ def _explain_illegal(board: chess.Board, uci: str) -> str:
     if board_copy.is_pseudo_legal(move):
         # Pseudo-legal but not fully legal — must leave king in check
         board_copy.push(move)
-        return f"After {uci}, your king would be in check."
+        return f"After {move_str}, your king would be in check."
     else:
         # Not even pseudo-legal — wrong piece movement or blocked path
         target = board.piece_at(move.to_square)
@@ -388,6 +393,9 @@ class LLMPlayer:
     def get_move(self, board: chess.Board, history_text: str) -> chess.Move:
         """Get a legal move from the LLM, with retries for illegal moves."""
         messages = []
+        # Accumulate correction text to avoid consecutive user messages,
+        # which violate llama.cpp / DMR Jinja chat templates.
+        corrections: list[str] = []
         system = self._build_system(board, history_text)
 
         for attempt in range(1, self.max_retries + 1):
@@ -464,7 +472,7 @@ class LLMPlayer:
             if tool_calls:
                 tc = tool_calls[0]
                 if tc["name"] == "make_move":
-                    proposed_uci = tc["arguments"].get("move", "").strip().lower()
+                    proposed_uci = tc["arguments"].get("move", "").strip()
             else:
                 proposed_uci = _extract_move_uci(content, board)
 
@@ -491,22 +499,33 @@ class LLMPlayer:
                         f"JUST THE UCI. ONE STRING. Example: {legal_san[0] if legal_san else 'e2e4'}"
                     )
 
-                messages.append({"role": "user", "content": error_msg})
+                corrections.append(error_msg)
+                messages[:] = [{"role": "user", "content": "\n\n---\n\n".join(corrections)}]
                 # Auto-disable tools for subsequent attempts if model ignored them
                 if attempt >= 2 and self.use_tools and not used_tools:
                     self.use_tools = False
                 continue
 
-            # Validate
+            # Validate — try SAN first (models often output "Nc6" not "b8c6"),
+            # then UCI (always lowercase).
+            move = None
             try:
-                move = board.parse_uci(proposed_uci)
+                move = board.parse_san(proposed_uci)
             except ValueError:
+                try:
+                    move = board.parse_uci(proposed_uci.lower())
+                except ValueError:
+                    pass
+
+            if move is None:
                 error_msg = (
-                    f"'{proposed_uci}' is not valid UCI notation. "
-                    f"Use format like e2e4, g1f3, or e7e8q (promotion). "
+                    f"'{proposed_uci}' is not valid chess notation. "
+                    f"Use UCI format like e2e4, g1f3, or e7e8q (promotion). "
+                    f"Or SAN like Nf3, O-O, exd5. "
                     f"Try again."
                 )
-                messages.append({"role": "user", "content": error_msg})
+                corrections.append(error_msg)
+                messages[:] = [{"role": "user", "content": "\n\n---\n\n".join(corrections)}]
                 continue
 
             if move in board.legal_moves:
@@ -520,7 +539,8 @@ class LLMPlayer:
                     f"Some legal moves: {', '.join(legal_san)}.\n"
                     f"Please pick a legal move."
                 )
-                messages.append({"role": "user", "content": error_msg})
+                corrections.append(error_msg)
+                messages[:] = [{"role": "user", "content": "\n\n---\n\n".join(corrections)}]
 
         # Exhausted retries
         raise IllegalMoveForfeit(
