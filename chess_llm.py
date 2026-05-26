@@ -38,6 +38,12 @@ from typing import Optional
 import chess
 import chess.pgn
 
+# Debug mode: set LLM_CHESS_DEBUG=1 (or DEBUG_CHESS_LLM=1) to see model responses
+DEBUG = (
+    os.environ.get("LLM_CHESS_DEBUG", "") == "1"
+    or os.environ.get("DEBUG_CHESS_LLM", "") == "1"
+)
+
 # ── Provider presets ──────────────────────────────────────────────────────────
 #   prefix            → (api_base,                          api_key_env_var)
 #   opencode-go/model → https://opencode.ai/zen/go/v1       OPENCODE_GO_API_KEY
@@ -120,7 +126,7 @@ def _call_llm(
 
     # Suppress litellm's noisy stderr output
     _stderr_backup = None
-    if not os.environ.get("LLM_CHESS_DEBUG"):
+    if not DEBUG:
         litellm.suppress_debug_info = True
         litellm.set_verbose = False
         import logging
@@ -361,7 +367,7 @@ class LLMPlayer:
 
         for attempt in range(1, self.max_retries + 1):
             was_retry = attempt > 1
-            if os.environ.get("LLM_CHESS_DEBUG"):
+            if DEBUG:
                 label = f"retry {attempt}/{self.max_retries}" if was_retry else "thinking"
                 print(f"  🤔 {self.name}: {label}...", flush=True)
             try:
@@ -391,7 +397,7 @@ class LLMPlayer:
             tool_calls = result.get("tool_calls", [])
 
             # Debug: show what the model returned
-            if os.environ.get("LLM_CHESS_DEBUG"):
+            if DEBUG:
                 print(f"  🔍 {self.name} response (attempt {attempt}):")
                 if tool_calls:
                     print(f"     tool_calls: {tool_calls}")
@@ -410,14 +416,21 @@ class LLMPlayer:
             if not content and not tool_calls:
                 if attempt < self.max_retries:
                     wait = 2 ** attempt
-                    print(f"  ⚠ {self.name}: empty API response, retrying in {wait}s...")
+                    hint = ""
+                    if self.use_tools and attempt == 1:
+                        hint = " (model may not support tools — try --no-tools)"
+                    print(f"  ⚠ {self.name}: empty API response, retrying in {wait}s...{hint}")
                     time.sleep(wait)
+                    # Auto-disable tools for retry 2+ if model returned nothing
+                    if attempt >= 2 and self.use_tools:
+                        self.use_tools = False
                     continue
                 # Final attempt also empty — give up gracefully
+                tip = " Try --no-tools if the model doesn't support tool calling." if self.use_tools else ""
                 print(f"  ❌ {self.name}: API returned empty responses for all {self.max_retries} attempts.")
                 raise IllegalMoveForfeit(
                     f"{self.name} got empty responses from the API "
-                    f"{self.max_retries} times in a row. Possible rate limit or API issue."
+                    f"{self.max_retries} times in a row.{tip}"
                 )
 
             # Extract UCI
