@@ -54,6 +54,16 @@ class ELOComputer:
             "rating": self.initial, "games": 0, "wins": 0, "losses": 0, "draws": 0,
         })
 
+    def load_existing(self, db_path: str):
+        """Load existing ratings from a JSON file (e.g. ratings.json)."""
+        import json, os
+        if os.path.exists(db_path):
+            with open(db_path) as f:
+                data = json.load(f)
+            self.ratings = data
+            return len(data)
+        return 0
+
     def add_game(self, white_id: str, black_id: str, result: str):
         w = self._get(white_id)
         b = self._get(black_id)
@@ -161,6 +171,12 @@ class TournamentApp(App):
         # Pre-load resume data into ELO computer
         if self._resume_elo:
             self.elo.ratings = self._resume_elo
+
+        # Load existing ratings from disk so ELO accumulates across tournaments
+        if self.elo_db_path:
+            loaded = self.elo.load_existing(self.elo_db_path)
+            if loaded:
+                self._tui_log(f"📂 Loaded {loaded} existing ratings from {self.elo_db_path}")
 
         # Build remaining task list (skipping already-completed)
         self._task_list = compute_remaining_tasks(
@@ -409,12 +425,17 @@ class TournamentApp(App):
         widget.update("\n".join(lines))
 
     def _save_elo(self):
-        """Save current ELO ratings to disk."""
+        """Save accumulated ELO ratings to disk.
+
+        Since we loaded existing ratings at startup and accumulated new games
+        in-memory, self.elo.ratings already contains the correct merged data
+        (old ratings + new games). Just write it out.
+        """
         if self.elo_db_path and self.elo.ratings:
             from elo import EloTracker
             tracker = EloTracker(self.elo_db_path)
-            for pid, stats in self.elo.ratings.items():
-                tracker._ratings[pid] = stats
+            # Replace tracker's in-memory dict with our accumulated data
+            tracker._ratings = self.elo.ratings
             tracker._save()
             return True
         return False
