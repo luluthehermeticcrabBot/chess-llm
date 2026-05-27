@@ -18,9 +18,11 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import datetime
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -56,6 +58,19 @@ def parse_player_spec(spec: str):
         use_tools=False,  # default for tournaments: text mode is more reliable
     )
     return player, spec
+
+
+def _elo_id_from_spec(spec: str) -> str:
+    """Extract the ELO key from a player spec WITHOUT creating a player instance."""
+    spec = spec.strip()
+    if spec.lower() in ("human", "random"):
+        return spec.lower()
+    if spec.lower() == "stockfish":
+        return "stockfish-20"
+    if spec.startswith("stockfish:"):
+        skill = int(spec.split(":")[1])
+        return f"stockfish-{skill}"
+    return spec
 
 
 def run_match(white_spec: str, black_spec: str,
@@ -110,80 +125,193 @@ def run_match(white_spec: str, black_spec: str,
 
 def round_robin(models: list[str], games_per_pair: int = 1,
                 delay: float = 0.5, elo_tracker: Optional[EloTracker] = None,
-                **player_kwargs):
-    """Run a round-robin tournament (each model plays every other as both colors)."""
+                max_workers: int = 1, **player_kwargs):
+    """Run a round-robin tournament (each model plays every other as both colors).
+
+    When max_workers > 1, games run in parallel via ThreadPoolExecutor.
+    ELO updates are batched after all games complete to avoid file corruption.
+    """
+    total_games = len(models) * (len(models) - 1) * games_per_pair
     print(f"\n🏟  Round-Robin Tournament: {len(models)} players")
     print(f"   Models: {', '.join(models)}")
     print(f"   Games per pair: {games_per_pair}")
-    print(f"   Total games: {len(models) * (len(models) - 1) * games_per_pair}")
+    print(f"   Total games: {total_games}")
+    if max_workers > 1:
+        print(f"   Parallel workers: {max_workers}  |  ELO: batch-at-end")
 
     results = []
     start_time = time.time()
 
+    # ── Build task list ───────────────────────────────────────────────
+    tasks = []
     for i, white_model in enumerate(models):
         for j, black_model in enumerate(models):
             if i == j:
                 continue
             for g in range(games_per_pair):
-                print(f"\n── Round: {white_model} vs {black_model} "
-                      f"(game {g + 1}/{games_per_pair}) ──")
-                try:
-                    result = run_match(
-                        white_model, black_model,
-                        delay=delay,
-                        elo_tracker=elo_tracker,
-                        **player_kwargs,
-                    )
+                tasks.append((white_model, black_model, g))
+
+    # ── Sequential mode ───────────────────────────────────────────────
+    if max_workers <= 1:
+        for white_model, black_model, g in tasks:
+            print(f"\n── Round: {white_model} vs {black_model} "
+                  f"(game {g + 1}/{games_per_pair}) ──")
+            try:
+                result = run_match(
+                    white_model, black_model,
+                    delay=delay, elo_tracker=elo_tracker,
+                    **player_kwargs,
+                )
+                results.append((white_model, black_model, result))
+            except Exception as e:
+                print(f"  ❌ Match failed: {e}")
+                results.append((white_model, black_model, "error"))
+            time.sleep(0.5)
+
+    # ── Parallel mode ─────────────────────────────────────────────────
+    else:
+        completed = 0
+        failed = 0
+        _lock = threading.Lock()
+
+        def _run_one(task):
+            white_model, black_model, g = task
+            try:
+                result = run_match(
+                    white_model, black_model,
+                    delay=delay, elo_tracker=None,  # no ELO during parallel
+                    **player_kwargs,
+                )
+                return (white_model, black_model, result, None)
+            except Exception as e:
+                return (white_model, black_model, "error", str(e))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_run_one, t): t for t in tasks}
+            for future in concurrent.futures.as_completed(futures):
+                white_model, black_model, result, error = future.result()
+                with _lock:
+                    completed += 1
+                    if error:
+                        failed += 1
                     results.append((white_model, black_model, result))
-                except Exception as e:
-                    print(f"  ❌ Match failed: {e}")
-                    results.append((white_model, black_model, "error"))
-                time.sleep(0.5)  # brief pause between games
+                    pct = completed * 100 // len(tasks)
+                    status = f"  ⚡ [{completed}/{len(tasks)}] {pct}%  "
+                    if failed:
+                        status += f"({failed} failed)  "
+                    status += f"{white_model} vs {black_model} → {result}"
+                    print(status)
+
+        # ── Batch ELO update ──────────────────────────────────────────
+        if elo_tracker:
+            print(f"\n📊 Computing ELO ratings...")
+            for white_model, black_model, result in results:
+                if result == "error":
+                    continue
+                w_id = _elo_id_from_spec(white_model)
+                b_id = _elo_id_from_spec(black_model)
+                elo_tracker.update(w_id, b_id, result)
+            elo_tracker.print_leaderboard()
+            return results
 
     elapsed = time.time() - start_time
     print(f"\n{'=' * 50}")
     print(f"  Tournament complete in {elapsed:.0f}s")
     print(f"  Games: {len(results)}")
-    if elo_tracker:
+    if elo_tracker and max_workers <= 1:
         elo_tracker.print_leaderboard()
     return results
 
 
 def gauntlet(champion: str, opponents: list[str],
              games_per_opponent: int = 1, delay: float = 0.5,
-             elo_tracker: Optional[EloTracker] = None, **player_kwargs):
-    """Gauntlet: champion plays each opponent (both colors)."""
+             elo_tracker: Optional[EloTracker] = None,
+             max_workers: int = 1, **player_kwargs):
+    """Gauntlet: champion plays each opponent (both colors).
+
+    When max_workers > 1, games run in parallel via ThreadPoolExecutor.
+    ELO updates are batched after all games complete.
+    """
+    total_games = len(opponents) * games_per_opponent * 2
     print(f"\n🏟  Gauntlet: {champion} vs the field")
     print(f"   Opponents: {', '.join(opponents)}")
     print(f"   Games per opponent: {games_per_opponent * 2} (both colors)")
+    if max_workers > 1:
+        print(f"   Parallel workers: {max_workers}  |  ELO: batch-at-end")
 
     results = []
     start_time = time.time()
 
+    # ── Build task list ───────────────────────────────────────────────
+    tasks = []
     for opponent in opponents:
         for g in range(games_per_opponent):
-            # Champion as white
-            print(f"\n── Gauntlet: {champion} (W) vs {opponent} (B) (game {g + 1}) ──")
-            try:
-                result = run_match(champion, opponent, delay=delay,
-                                   elo_tracker=elo_tracker, **player_kwargs)
-                results.append((champion, opponent, result))
-            except Exception as e:
-                print(f"  ❌ Match failed: {e}")
+            tasks.append((champion, opponent, g, "W"))   # champion as white
+            tasks.append((opponent, champion, g, "B"))   # champion as black
 
-            # Champion as black
-            print(f"\n── Gauntlet: {opponent} (W) vs {champion} (B) (game {g + 1}) ──")
+    # ── Sequential mode ───────────────────────────────────────────────
+    if max_workers <= 1:
+        for white_model, black_model, g, _ in tasks:
+            print(f"\n── Gauntlet: {white_model} (W) vs {black_model} (B) "
+                  f"(game {g + 1}) ──")
             try:
-                result = run_match(opponent, champion, delay=delay,
+                result = run_match(white_model, black_model, delay=delay,
                                    elo_tracker=elo_tracker, **player_kwargs)
-                results.append((opponent, champion, result))
+                results.append((white_model, black_model, result))
             except Exception as e:
                 print(f"  ❌ Match failed: {e}")
+                results.append((white_model, black_model, "error"))
+
+    # ── Parallel mode ─────────────────────────────────────────────────
+    else:
+        completed = 0
+        failed = 0
+        _lock = threading.Lock()
+
+        def _run_one(task):
+            white_model, black_model, g, _ = task
+            try:
+                result = run_match(
+                    white_model, black_model,
+                    delay=delay, elo_tracker=None,
+                    **player_kwargs,
+                )
+                return (white_model, black_model, result, None)
+            except Exception as e:
+                return (white_model, black_model, "error", str(e))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_run_one, t): t for t in tasks}
+            for future in concurrent.futures.as_completed(futures):
+                white_model, black_model, result, error = future.result()
+                with _lock:
+                    completed += 1
+                    if error:
+                        failed += 1
+                    results.append((white_model, black_model, result))
+                    pct = completed * 100 // len(tasks)
+                    status = f"  ⚡ [{completed}/{len(tasks)}] {pct}%  "
+                    if failed:
+                        status += f"({failed} failed)  "
+                    status += f"{white_model} vs {black_model} → {result}"
+                    print(status)
+
+        # ── Batch ELO update ──────────────────────────────────────────
+        if elo_tracker:
+            print(f"\n📊 Computing ELO ratings...")
+            for white_model, black_model, result in results:
+                if result == "error":
+                    continue
+                w_id = _elo_id_from_spec(white_model)
+                b_id = _elo_id_from_spec(black_model)
+                elo_tracker.update(w_id, b_id, result)
+            elo_tracker.print_leaderboard()
+            return results
 
     elapsed = time.time() - start_time
     print(f"\n{'=' * 50}")
     print(f"  Gauntlet complete in {elapsed:.0f}s")
-    if elo_tracker:
+    if elo_tracker and max_workers <= 1:
         elo_tracker.print_leaderboard()
     return results
 
@@ -208,6 +336,9 @@ def main():
                         help="Opponents for gauntlet mode")
     parser.add_argument("--games", type=int, default=1,
                         help="Games per pair (default: 1)")
+    parser.add_argument("--parallel", type=int, default=1, metavar="N",
+                        help="Run N games in parallel (default: 1, sequential). "
+                             "When >1 and --elo is set, ELO is batch-computed at the end.")
     parser.add_argument("--delay", type=float, default=0.5,
                         help="Delay between moves in seconds (default: 0.5)")
     parser.add_argument("--elo", action="store_true",
@@ -247,6 +378,7 @@ def main():
             games_per_pair=args.games,
             delay=args.delay,
             elo_tracker=elo_tracker,
+            max_workers=args.parallel,
             **player_kwargs,
         )
     elif args.gauntlet:
@@ -259,6 +391,7 @@ def main():
             games_per_opponent=args.games,
             delay=args.delay,
             elo_tracker=elo_tracker,
+            max_workers=args.parallel,
             **player_kwargs,
         )
 
