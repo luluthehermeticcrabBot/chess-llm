@@ -372,7 +372,34 @@ def main():
     tui_group.add_argument("--no-tui", action="store_true", default=None,
                            help="Force plain text mode (no dashboard)")
 
+    # ── Resume / log ──────────────────────────────────────────────────
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume a saved tournament from tournament_state.json")
+    parser.add_argument("--log", "-l", nargs="?", const="auto", default=None,
+                        help="Tee output to a log file (auto-names by date; or give a path)")
+
     args = parser.parse_args()
+
+    # ── Log file tee (for non-TUI mode) ───────────────────────────────
+    if args.log and not sys.stdout.isatty():
+        import datetime as _dt
+        if args.log == "auto":
+            ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".logs")
+            os.makedirs(log_dir, exist_ok=True)
+            args.log = os.path.join(log_dir, f"tournament_{ts}.txt")
+        # Tee stdout to log file
+        _log_file = open(args.log, "w", buffering=1)
+        _orig_stdout = sys.stdout
+        class _Tee:
+            def write(self, data):
+                _orig_stdout.write(data)
+                _log_file.write(data)
+            def flush(self):
+                _orig_stdout.flush()
+                _log_file.flush()
+        sys.stdout = _Tee()
+        print(f"📝 Logging to {args.log}")
 
     # Auto-detect TUI: use when stdout is a terminal unless explicitly disabled
     use_tui = args.tui if args.tui is not None else (
@@ -381,30 +408,56 @@ def main():
 
     # ── TUI path ──────────────────────────────────────────────────────
     if use_tui:
-        models = args.round_robin if args.round_robin else (
-            [args.gauntlet] + (args.opponents or [])
-        )
-        # Force at least 1 parallel worker in TUI mode
-        workers = max(args.parallel, 1)
-        player_kwargs = dict(
-            use_tools=not args.no_tools,
-            max_retries=args.retries,
-            temperature=args.temperature,
-            timeout=args.timeout,
-            threads=args.stockfish_threads,
-            skill_level=args.stockfish_skill,
-            think_time=args.stockfish_time,
-        )
-        elo_db = args.elo_db if args.elo else None
-
         from tui.tournament import TournamentApp
+        from tui.state import load_state
+
+        # Resume from saved state
+        resume_completed = None
+        resume_elo = None
+
+        if args.resume:
+            state = load_state()
+            if state is None:
+                print("❌ No saved tournament state found (tournament_state.json missing)")
+                sys.exit(1)
+            cfg = state["config"]
+            models = cfg["models"]
+            games_per_pair = cfg["games_per_pair"]
+            delay = cfg["delay"]
+            workers = cfg["max_workers"]
+            player_kwargs = cfg["player_kwargs"]
+            elo_db = cfg.get("elo_db_path")
+            resume_completed = [tuple(r) for r in state["completed"]]
+            resume_elo = state.get("elo_ratings", {})
+            print(f"📂 Resuming tournament: {len(resume_completed)} games already completed, "
+                  f"{len(models)} players")
+        else:
+            models = args.round_robin if args.round_robin else (
+                [args.gauntlet] + (args.opponents or [])
+            )
+            games_per_pair = args.games
+            delay = args.delay
+            workers = max(args.parallel, 1)
+            player_kwargs = dict(
+                use_tools=not args.no_tools,
+                max_retries=args.retries,
+                temperature=args.temperature,
+                timeout=args.timeout,
+                threads=args.stockfish_threads,
+                skill_level=args.stockfish_skill,
+                think_time=args.stockfish_time,
+            )
+            elo_db = args.elo_db if args.elo else None
+
         app = TournamentApp(
             models=models,
-            games_per_pair=args.games,
-            delay=args.delay,
+            games_per_pair=games_per_pair,
+            delay=delay,
             elo_db_path=elo_db,
             player_kwargs=player_kwargs,
             max_workers=workers,
+            resume_completed=resume_completed,
+            resume_elo=resume_elo,
         )
         app.run()
         return

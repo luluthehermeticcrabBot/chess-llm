@@ -19,3 +19,6 @@ stockfish = ["stockfish>=5.0"]
 
 [tool.uv]
 dev-dependencies = []
+
+[tool.setuptools.packages.find]
+exclude = ["games*", ".logs*", ".hermes*"]

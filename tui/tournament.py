@@ -21,6 +21,7 @@ from .common import (
     TUI_CSS, BG, SURFACE, ACCENT, HIGHLIGHT,
     TEXT_PRIMARY, TEXT_SECONDARY, SUCCESS, WARNING, ERROR, DRAW_COLOR,
 )
+from .state import save_state, clear_state, compute_remaining_tasks
 
 
 # ── Lightweight ELO key extractor (no player creation) ──────────────────
@@ -99,6 +100,7 @@ class TournamentApp(App):
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("p", "toggle_pause", "Pause/Resume"),
+        ("s", "save", "Save progress"),
     ]
 
     def __init__(
@@ -109,6 +111,8 @@ class TournamentApp(App):
         elo_db_path: Optional[str],
         player_kwargs: dict,
         max_workers: int,
+        resume_completed: Optional[list[tuple[str, str, str]]] = None,
+        resume_elo: Optional[dict] = None,
     ):
         super().__init__()
         self.models = models
@@ -117,6 +121,10 @@ class TournamentApp(App):
         self.elo_db_path = elo_db_path
         self.player_kwargs = player_kwargs
         self.max_workers = max_workers
+
+        # Resume state (pre-seeded results from a previous run)
+        self._resume_completed = resume_completed or []
+        self._resume_elo = resume_elo or {}
 
         # State
         self._completed: list[tuple[str, str, str]] = []  # (white, black, result)
@@ -146,21 +154,29 @@ class TournamentApp(App):
     # ── Mount ────────────────────────────────────────────────────────────
 
     def on_mount(self):
-        # Build task list
-        tasks = []
-        for i, wm in enumerate(self.models):
-            for j, bm in enumerate(self.models):
-                if i == j:
-                    continue
-                for _ in range(self.games_per_pair):
-                    tasks.append((wm, bm))
-        self._task_list = tasks
-        self._total_tasks = len(tasks)
+        # Pre-load resume data into ELO computer
+        if self._resume_elo:
+            self.elo.ratings = self._resume_elo
+
+        # Build remaining task list (skipping already-completed)
+        self._task_list = compute_remaining_tasks(
+            self.models, self.games_per_pair, self._resume_completed
+        )
+        self._completed = list(self._resume_completed)
+        self._total_tasks = len(self._task_list) + len(self._resume_completed)
         self._start_time = time.time()
 
         # Setup ELO table columns
         elo_table = self.query_one("#elo-table", DataTable)
         elo_table.add_columns("#", "Player", "ELO", "G", "W", "L", "D")
+
+        # Show resume info
+        if self._resume_completed:
+            self.notify(
+                f"Resumed with {len(self._resume_completed)} completed games, "
+                f"{len(self._task_list)} remaining",
+                title="📂 Resume"
+            )
 
         # Start workers
         self._start_workers()
@@ -192,6 +208,10 @@ class TournamentApp(App):
                 self._results_queue.put((white_model, black_model, result))
             except Exception as e:
                 self._results_queue.put((white_model, black_model, "error"))
+
+        if not self._task_list:
+            self._finished = True
+            return
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = []
@@ -243,8 +263,8 @@ class TournamentApp(App):
         pct = done * 100 // total if total > 0 else 0
         elapsed = time.time() - self._start_time
 
-        if done > 0:
-            eta = elapsed / done * (total - done)
+        if done > 0 and not self._finished:
+            eta = elapsed / (done - len(self._resume_completed)) * (total - done) if done > len(self._resume_completed) else 0
             eta_str = f"{eta:.0f}s" if eta < 120 else f"{eta/60:.1f}m"
         else:
             eta_str = "..."
@@ -273,7 +293,6 @@ class TournamentApp(App):
         lines = ["  ▶ Live games:"]
         with self._lock:
             items = list(self._active.items())
-        # Show up to 8
         for tid, (wm, bm, started) in items[:8]:
             elapsed = time.time() - started
             lines.append(f"    {wm}  vs  {bm}   ···  {elapsed:.0f}s")
@@ -303,7 +322,6 @@ class TournamentApp(App):
             widget.update("")
             return
 
-        # Per-player result summary
         summary: dict[str, dict[str, int]] = {}
         for wm, bm, result in self._completed:
             wid = _elo_id(wm)
@@ -322,7 +340,6 @@ class TournamentApp(App):
                 summary[bid]["D"] += 1
 
         lines = ["  📊  Results:  W–D–L"]
-        # Sort by ELO order
         board = self.elo.leaderboard()
         for pid, _ in board[:10]:
             if pid in summary:
@@ -334,7 +351,9 @@ class TournamentApp(App):
 
     def _on_complete(self):
         """Tournament finished — show final state and save ELO."""
-        self.query_one("#progress-label", Label).update("  🏁 Tournament complete!  Press q to quit.")
+        self.query_one("#progress-label", Label).update(
+            "  🏁 Tournament complete!  Press q to quit."
+        )
 
         # Save ELO to disk
         if self.elo_db_path:
@@ -345,8 +364,26 @@ class TournamentApp(App):
             tracker._save()
             self.notify(f"ELO saved to {self.elo_db_path}", title="✅ Done")
 
+        # Clear saved state (tournament finished cleanly)
+        clear_state()
+
     # ── Actions ──────────────────────────────────────────────────────────
 
     def action_toggle_pause(self):
         self._paused = not self._paused
         self.notify("Paused" if self._paused else "Resumed")
+
+    def action_save(self):
+        """Save tournament progress to disk for later resume."""
+        path = save_state(
+            models=self.models,
+            games_per_pair=self.games_per_pair,
+            delay=self.delay,
+            max_workers=self.max_workers,
+            player_kwargs=self.player_kwargs,
+            completed=self._completed,
+            elo_ratings=self.elo.ratings,
+            elo_db_path=self.elo_db_path,
+            started_at=self._start_time,
+        )
+        self.notify(f"Saved {len(self._completed)} games to {path}", title="💾 Saved")
