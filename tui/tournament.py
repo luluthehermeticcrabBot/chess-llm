@@ -113,6 +113,7 @@ class TournamentApp(App):
         max_workers: int,
         resume_completed: Optional[list[tuple[str, str, str]]] = None,
         resume_elo: Optional[dict] = None,
+        openings_mode: str = "standard",
     ):
         super().__init__()
         self.models = models
@@ -121,6 +122,7 @@ class TournamentApp(App):
         self.elo_db_path = elo_db_path
         self.player_kwargs = player_kwargs
         self.max_workers = max_workers
+        self.openings_mode = openings_mode
 
         # Resume state (pre-seeded results from a previous run)
         self._resume_completed = resume_completed or []
@@ -190,10 +192,33 @@ class TournamentApp(App):
         """Run tournament games in background threads."""
         import concurrent.futures
 
+        # Pre-load openings if needed
+        openings_list = None
+        if self.openings_mode == "unbalanced":
+            from openings import OPENINGS
+            openings_list = OPENINGS
+            import chess as _chess
+
+        _opening_counter = [0]  # mutable counter shared across threads
+        _opening_lock = threading.Lock()
+
+        def _get_opening():
+            """Return (board, name) or (None, '')."""
+            if openings_list is None:
+                return None, ""
+            with _opening_lock:
+                idx = _opening_counter[0]
+                _opening_counter[0] += 1
+            name, moves, advantage = openings_list[idx % len(openings_list)]
+            board = _chess.Board()
+            for uci in moves:
+                board.push_uci(uci)
+            return board, name
+
         def _run_one(white_model, black_model):
             from tournament import run_match
+            board, oname = _get_opening()
             try:
-                # Suppress board output during TUI mode
                 import sys, io
                 old_stdout = sys.stdout
                 sys.stdout = io.StringIO()
@@ -201,6 +226,7 @@ class TournamentApp(App):
                     result = run_match(
                         white_model, black_model,
                         delay=self.delay, elo_tracker=None,
+                        starting_board=board, opening_name=oname,
                         **self.player_kwargs,
                     )
                 finally:

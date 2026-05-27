@@ -785,11 +785,12 @@ class ChessMatch:
         delay: float = 1.0,
         event: str = "LLM Chess Match",
         round_name: str = "1",
+        starting_board: chess.Board | None = None,
     ):
         self.white = white
         self.black = black
         self.delay = delay  # seconds between moves for readability
-        self.board = chess.Board()
+        self.board = starting_board.copy() if starting_board else chess.Board()
         self.pgn_game = chess.pgn.Game()
         self.pgn_game.headers["Event"] = event
         self.pgn_game.headers["Site"] = "LLM Chess CLI"

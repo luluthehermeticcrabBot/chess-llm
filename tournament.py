@@ -85,6 +85,8 @@ def run_match(white_spec: str, black_spec: str,
               delay: float = 0.5,
               elo_tracker: Optional[EloTracker] = None,
               log_dir: Optional[str] = None,
+              starting_board = None,
+              opening_name: str = "",
               **player_kwargs) -> str:
     """Run a single match. Returns result string ('1-0', '0-1', '1/2-1/2')."""
     from chess_llm import ChessMatch
@@ -106,11 +108,17 @@ def run_match(white_spec: str, black_spec: str,
             except Exception as e:
                 print(f"   ⚠ {p.name}: connectivity check failed: {e}")
 
-    print(f"\n{'=' * 50}")
-    print(f"  {white.name} (White)  vs  {black.name} (Black)")
-    print(f"{'=' * 50}")
+    if starting_board is not None and opening_name:
+        print(f"\n{'=' * 50}")
+        print(f"  {white.name} (White)  vs  {black.name} (Black)")
+        print(f"  Opening: {opening_name}")
+        print(f"{'=' * 50}")
+    else:
+        print(f"\n{'=' * 50}")
+        print(f"  {white.name} (White)  vs  {black.name} (Black)")
+        print(f"{'=' * 50}")
 
-    match = ChessMatch(white, black, delay=delay)
+    match = ChessMatch(white, black, delay=delay, starting_board=starting_board)
     result = match.play()
 
     # Save PGN
@@ -133,41 +141,68 @@ def run_match(white_spec: str, black_spec: str,
 
 def round_robin(models: list[str], games_per_pair: int = 1,
                 delay: float = 0.5, elo_tracker: Optional[EloTracker] = None,
-                max_workers: int = 1, **player_kwargs):
+                max_workers: int = 1, openings_mode: str = "standard",
+                **player_kwargs):
     """Run a round-robin tournament (each model plays every other as both colors).
 
     When max_workers > 1, games run in parallel via ThreadPoolExecutor.
     ELO updates are batched after all games complete to avoid file corruption.
+    openings_mode: 'standard' (default) or 'unbalanced' (forces decisive games).
     """
     total_games = len(models) * (len(models) - 1) * games_per_pair
     print(f"\n🏟  Round-Robin Tournament: {len(models)} players")
     print(f"   Models: {', '.join(models)}")
     print(f"   Games per pair: {games_per_pair}")
     print(f"   Total games: {total_games}")
+    if openings_mode == "unbalanced":
+        from openings import OPENINGS
+        print(f"   Openings: unbalanced ({len(OPENINGS)} lines, alternating advantage)")
     if max_workers > 1:
         print(f"   Parallel workers: {max_workers}  |  ELO: batch-at-end")
+
+    # Lazy-load openings module
+    _openings_uci = None
+
+    def _get_starting_board(opening_idx: int):
+        """Return (board, opening_name) for the given opening index, or (None, '')."""
+        nonlocal _openings_uci
+        if openings_mode != "unbalanced":
+            return None, ""
+        if _openings_uci is None:
+            from openings import OPENINGS
+            _openings_uci = OPENINGS
+        import chess
+        name, moves, advantage = _openings_uci[opening_idx % len(_openings_uci)]
+        board = chess.Board()
+        for uci in moves:
+            board.push_uci(uci)
+        return board, name
 
     results = []
     start_time = time.time()
 
     # ── Build task list ───────────────────────────────────────────────
     tasks = []
+    opening_counter = 0
     for i, white_model in enumerate(models):
         for j, black_model in enumerate(models):
             if i == j:
                 continue
             for g in range(games_per_pair):
-                tasks.append((white_model, black_model, g))
+                tasks.append((white_model, black_model, g, opening_counter))
+                opening_counter += 1
 
     # ── Sequential mode ───────────────────────────────────────────────
     if max_workers <= 1:
-        for white_model, black_model, g in tasks:
+        for white_model, black_model, g, oi in tasks:
+            board, oname = _get_starting_board(oi)
             print(f"\n── Round: {white_model} vs {black_model} "
                   f"(game {g + 1}/{games_per_pair}) ──")
             try:
                 result = run_match(
                     white_model, black_model,
                     delay=delay, elo_tracker=elo_tracker,
+                    starting_board=board, opening_name=oname,
                     **player_kwargs,
                 )
                 results.append((white_model, black_model, result))
@@ -183,11 +218,13 @@ def round_robin(models: list[str], games_per_pair: int = 1,
         _lock = threading.Lock()
 
         def _run_one(task):
-            white_model, black_model, g = task
+            white_model, black_model, g, oi = task
+            board, oname = _get_starting_board(oi)
             try:
                 result = run_match(
                     white_model, black_model,
-                    delay=delay, elo_tracker=None,  # no ELO during parallel
+                    delay=delay, elo_tracker=None,
+                    starting_board=board, opening_name=oname,
                     **player_kwargs,
                 )
                 return (white_model, black_model, result, None)
@@ -347,6 +384,11 @@ def main():
     parser.add_argument("--parallel", type=int, default=1, metavar="N",
                         help="Run N games in parallel (default: 1, sequential). "
                              "When >1 and --elo is set, ELO is batch-computed at the end.")
+    parser.add_argument("--openings", choices=["standard", "unbalanced"],
+                        default="standard",
+                        help="Opening mode: 'standard' (from start position) or "
+                             "'unbalanced' (pre-played lines that favor one side, "
+                             "reducing draw rates in engine tournaments)")
     parser.add_argument("--delay", type=float, default=0.5,
                         help="Delay between moves in seconds (default: 0.5)")
     parser.add_argument("--elo", action="store_true",
@@ -458,6 +500,7 @@ def main():
             max_workers=workers,
             resume_completed=resume_completed,
             resume_elo=resume_elo,
+            openings_mode=args.openings if not args.resume else resume_elo.get("openings_mode", "standard"),
         )
         app.run()
         return
@@ -482,6 +525,7 @@ def main():
             delay=args.delay,
             elo_tracker=elo_tracker,
             max_workers=args.parallel,
+            openings_mode=args.openings,
             **player_kwargs,
         )
     elif args.gauntlet:
