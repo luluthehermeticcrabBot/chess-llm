@@ -1124,10 +1124,12 @@ def main():
             """Extract a clean ELO ID from a player instance."""
             if hasattr(player, "model"):
                 return player.model  # LLMPlayer: use the raw model string
+            if hasattr(player, "skill_level"):
+                return f"stockfish-{player.skill_level}"  # StockfishPlayer
             name = player.name
-            # Strip color suffix: "Stockfish 20 (White)" → "Stockfish 20"
+            # Strip color suffix: "Human (White)" → "Human"
             if " (" in name:
-                name = name[: name.rindex(" (")]
+                name = name[: name.rindex(" (")] 
             return name
 
         w_id = _elo_id(white)
