@@ -450,59 +450,64 @@ def main():
 
     # ── TUI path ──────────────────────────────────────────────────────
     if use_tui:
-        from tui.tournament import TournamentApp
-        from tui.state import load_state
+        try:
+            from tui.tournament import TournamentApp
+            from tui.state import load_state
 
-        # Resume from saved state
-        resume_completed = None
-        resume_elo = None
+            # Resume from saved state
+            resume_completed = None
+            resume_elo = None
 
-        if args.resume:
-            state = load_state()
-            if state is None:
-                print("❌ No saved tournament state found (tournament_state.json missing)")
-                sys.exit(1)
-            cfg = state["config"]
-            models = cfg["models"]
-            games_per_pair = cfg["games_per_pair"]
-            delay = cfg["delay"]
-            workers = cfg["max_workers"]
-            player_kwargs = cfg["player_kwargs"]
-            elo_db = cfg.get("elo_db_path")
-            resume_completed = [tuple(r) for r in state["completed"]]
-            resume_elo = state.get("elo_ratings", {})
-            print(f"📂 Resuming tournament: {len(resume_completed)} games already completed, "
-                  f"{len(models)} players")
-        else:
-            models = args.round_robin if args.round_robin else (
-                [args.gauntlet] + (args.opponents or [])
+            if args.resume:
+                state = load_state()
+                if state is None:
+                    print("❌ No saved tournament state found (tournament_state.json missing)")
+                    sys.exit(1)
+                cfg = state["config"]
+                models = cfg["models"]
+                games_per_pair = cfg["games_per_pair"]
+                delay = cfg["delay"]
+                workers = cfg["max_workers"]
+                player_kwargs = cfg["player_kwargs"]
+                elo_db = cfg.get("elo_db_path")
+                resume_completed = [tuple(r) for r in state["completed"]]
+                resume_elo = state.get("elo_ratings", {})
+                print(f"📂 Resuming tournament: {len(resume_completed)} games already completed, "
+                      f"{len(models)} players")
+            else:
+                models = args.round_robin if args.round_robin else (
+                    [args.gauntlet] + (args.opponents or [])
+                )
+                games_per_pair = args.games
+                delay = args.delay
+                workers = max(args.parallel, 1)
+                player_kwargs = dict(
+                    use_tools=not args.no_tools,
+                    max_retries=args.retries,
+                    temperature=args.temperature,
+                    timeout=args.timeout,
+                    threads=args.stockfish_threads,
+                    think_time=args.stockfish_time,
+                )
+                elo_db = args.elo_db if args.elo else None
+
+            app = TournamentApp(
+                models=models,
+                games_per_pair=games_per_pair,
+                delay=delay,
+                elo_db_path=elo_db,
+                player_kwargs=player_kwargs,
+                max_workers=workers,
+                resume_completed=resume_completed,
+                resume_elo=resume_elo,
+                openings_mode=args.openings if not args.resume else resume_elo.get("openings_mode", "standard"),
             )
-            games_per_pair = args.games
-            delay = args.delay
-            workers = max(args.parallel, 1)
-            player_kwargs = dict(
-                use_tools=not args.no_tools,
-                max_retries=args.retries,
-                temperature=args.temperature,
-                timeout=args.timeout,
-                threads=args.stockfish_threads,
-                think_time=args.stockfish_time,
-            )
-            elo_db = args.elo_db if args.elo else None
-
-        app = TournamentApp(
-            models=models,
-            games_per_pair=games_per_pair,
-            delay=delay,
-            elo_db_path=elo_db,
-            player_kwargs=player_kwargs,
-            max_workers=workers,
-            resume_completed=resume_completed,
-            resume_elo=resume_elo,
-            openings_mode=args.openings if not args.resume else resume_elo.get("openings_mode", "standard"),
-        )
-        app.run()
-        return
+            app.run()
+            return
+        except Exception as e:
+            print(f"⚠ TUI failed to start: {e}", file=sys.stderr)
+            print("Falling back to plain-text mode. Use --no-tui to skip this warning.", file=sys.stderr)
+            # Fall through to non-TUI path below
 
     # ELO tracker
     elo_tracker = EloTracker(args.elo_db) if args.elo else None
