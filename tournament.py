@@ -237,6 +237,8 @@ def main():
         temperature=args.temperature,
         timeout=args.timeout,
         threads=args.stockfish_threads,
+        skill_level=args.stockfish_skill,
+        think_time=args.stockfish_time,
     )
 
     if args.round_robin:
