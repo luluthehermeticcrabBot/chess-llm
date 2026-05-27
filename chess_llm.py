@@ -687,11 +687,13 @@ class StockfishPlayer:
         name: str = "Stockfish",
         skill_level: int = 20,
         think_time: float = 0.1,
+        threads: int | None = None,
         binary_path: str | None = None,
     ):
         self.name = name
         self.skill_level = skill_level
         self.think_time = think_time
+        self.threads = threads
         self.binary_path = binary_path or self._find_binary()
         self.illegal_count = 0
         self._engine = None
@@ -714,7 +716,10 @@ class StockfishPlayer:
                 self.binary_path,
                 timeout=30.0,  # generous startup timeout for slow systems
             )
-            self._engine.configure({"Skill Level": self.skill_level})
+            config = {"Skill Level": self.skill_level}
+            if self.threads is not None:
+                config["Threads"] = self.threads
+            self._engine.configure(config)
         return self._engine
 
     def get_move(self, board: chess.Board, history_text: str) -> chess.Move:
@@ -994,6 +999,11 @@ def main():
         help="Path to stockfish binary (default: auto-detect from PATH or common locations)",
     )
     parser.add_argument(
+        "--stockfish-threads", type=int, default=None,
+        help="Number of CPU threads for Stockfish (default: use all cores). "
+             "Set to 1 or 2 to keep the fan quiet during tournaments.",
+    )
+    parser.add_argument(
         "--api-base",
         help="Custom API base URL (or set LLM_CHESS_API_BASE env var)",
     )
@@ -1073,6 +1083,7 @@ def main():
                 name=f"Stockfish {skill} ({color})",
                 skill_level=skill,
                 think_time=args.stockfish_time,
+                threads=args.stockfish_threads,
                 binary_path=args.stockfish_path,
             )
         else:

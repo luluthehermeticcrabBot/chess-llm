@@ -69,12 +69,11 @@ def run_match(white_spec: str, black_spec: str,
     white, w_id = parse_player_spec(white_spec)
     black, b_id = parse_player_spec(black_spec)
 
-    # Apply kwargs to LLMPlayers
+    # Apply kwargs to players (LLM and Stockfish)
     for p in (white, black):
-        if hasattr(p, "temperature"):
-            for k, v in player_kwargs.items():
-                if hasattr(p, k):
-                    setattr(p, k, v)
+        for k, v in player_kwargs.items():
+            if hasattr(p, k):
+                setattr(p, k, v)
 
     # Pre-flight
     for p in (white, black):
@@ -221,6 +220,11 @@ def main():
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--stockfish-skill", type=int, default=20)
     parser.add_argument("--stockfish-time", type=float, default=0.1)
+    parser.add_argument(
+        "--stockfish-threads", type=int, default=None,
+        help="Number of CPU threads for Stockfish (default: use all cores). "
+             "Set to 1 or 2 to keep the fan quiet during tournaments.",
+    )
 
     args = parser.parse_args()
 
@@ -232,6 +236,7 @@ def main():
         max_retries=args.retries,
         temperature=args.temperature,
         timeout=args.timeout,
+        threads=args.stockfish_threads,
     )
 
     if args.round_robin:
