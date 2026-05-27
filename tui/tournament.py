@@ -129,14 +129,15 @@ class TournamentApp(App):
         self._resume_elo = resume_elo or {}
 
         # State
-        self._completed: list[tuple[str, str, str]] = []  # (white, black, result)
-        self._active: dict[int, tuple[str, str, float]] = {}  # task_id → (white, black, started)
+        self._completed: list[tuple[str, str, str]] = []
+        self._active: dict[int, tuple[str, str, float]] = {}
         self._results_queue: queue.Queue = queue.Queue()
         self._task_list: list[tuple[str, str]] = []
         self._total_tasks = 0
         self._start_time = 0.0
         self._paused = False
         self._finished = False
+        self._stop_flag = threading.Event()
         self.elo = ELOComputer()
         self._task_id = 0
         self._lock = threading.Lock()
@@ -199,11 +200,10 @@ class TournamentApp(App):
             openings_list = OPENINGS
             import chess as _chess
 
-        _opening_counter = [0]  # mutable counter shared across threads
+        _opening_counter = [0]
         _opening_lock = threading.Lock()
 
         def _get_opening():
-            """Return (board, name) or (None, '')."""
             if openings_list is None:
                 return None, ""
             with _opening_lock:
@@ -216,8 +216,6 @@ class TournamentApp(App):
             return board, name
 
         def _run_one(white_model, black_model):
-            # Import run_match from the running module (handles both
-            # 'python tournament.py' and 'python -m tournament' cases)
             import sys as _sys
             _mod = _sys.modules.get("__main__")
             if _mod is None or not hasattr(_mod, "run_match"):
@@ -247,20 +245,31 @@ class TournamentApp(App):
             return
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = []
+            futures = {}
             for wm, bm in self._task_list:
                 with self._lock:
                     tid = self._task_id
                     self._task_id += 1
                     self._active[tid] = (wm, bm, time.time())
                 f = executor.submit(_run_one, wm, bm)
-                futures.append((f, tid))
+                futures[f] = tid
 
-            # Wait for all to complete
-            for f, tid in futures:
-                f.result()
+            # Wait for completion with interruptible as_completed loop
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    f.result(timeout=1)  # short timeout to check stop flag
+                except concurrent.futures.TimeoutError:
+                    pass  # keep waiting
+                except Exception:
+                    pass
                 with self._lock:
-                    self._active.pop(tid, None)
+                    tid = futures.pop(f, None)
+                    if tid is not None:
+                        self._active.pop(tid, None)
+                # Check stop flag every iteration
+                if self._stop_flag.is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
 
         self._finished = True
 
@@ -382,25 +391,37 @@ class TournamentApp(App):
 
         widget.update("\n".join(lines))
 
-    def _on_complete(self):
-        """Tournament finished — show final state and save ELO."""
-        self.query_one("#progress-label", Label).update(
-            "  🏁 Tournament complete!  Press q to quit."
-        )
-
-        # Save ELO to disk
-        if self.elo_db_path:
+    def _save_elo(self):
+        """Save current ELO ratings to disk."""
+        if self.elo_db_path and self.elo.ratings:
             from elo import EloTracker
             tracker = EloTracker(self.elo_db_path)
             for pid, stats in self.elo.ratings.items():
                 tracker._ratings[pid] = stats
             tracker._save()
-            self.notify(f"ELO saved to {self.elo_db_path}", title="✅ Done")
+            return True
+        return False
 
-        # Clear saved state (tournament finished cleanly)
+    def _on_complete(self):
+        """Tournament finished — show final state and save ELO."""
+        self.query_one("#progress-label", Label).update(
+            "  🏁 Tournament complete!  Press q to quit."
+        )
+        if self._save_elo():
+            self.notify(f"ELO saved to {self.elo_db_path}", title="✅ Done")
         clear_state()
 
     # ── Actions ──────────────────────────────────────────────────────────
+
+    def action_quit(self):
+        """Quit: save ELO, stop workers, then exit."""
+        self._stop_flag.set()
+        # Drain any remaining results
+        self._poll()
+        if not self._finished:
+            self._save_elo()
+            clear_state()
+        self.exit()
 
     def action_toggle_pause(self):
         self._paused = not self._paused
