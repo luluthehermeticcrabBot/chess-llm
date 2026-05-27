@@ -365,7 +365,49 @@ def main():
              "Set to 1 or 2 to keep the fan quiet during tournaments.",
     )
 
+    # ── TUI ───────────────────────────────────────────────────────────
+    tui_group = parser.add_mutually_exclusive_group()
+    tui_group.add_argument("--tui", action="store_true", default=None,
+                           help="Force TUI dashboard mode")
+    tui_group.add_argument("--no-tui", action="store_true", default=None,
+                           help="Force plain text mode (no dashboard)")
+
     args = parser.parse_args()
+
+    # Auto-detect TUI: use when stdout is a terminal unless explicitly disabled
+    use_tui = args.tui if args.tui is not None else (
+        sys.stdout.isatty() and args.no_tui is not True
+    )
+
+    # ── TUI path ──────────────────────────────────────────────────────
+    if use_tui:
+        models = args.round_robin if args.round_robin else (
+            [args.gauntlet] + (args.opponents or [])
+        )
+        # Force at least 1 parallel worker in TUI mode
+        workers = max(args.parallel, 1)
+        player_kwargs = dict(
+            use_tools=not args.no_tools,
+            max_retries=args.retries,
+            temperature=args.temperature,
+            timeout=args.timeout,
+            threads=args.stockfish_threads,
+            skill_level=args.stockfish_skill,
+            think_time=args.stockfish_time,
+        )
+        elo_db = args.elo_db if args.elo else None
+
+        from tui.tournament import TournamentApp
+        app = TournamentApp(
+            models=models,
+            games_per_pair=args.games,
+            delay=args.delay,
+            elo_db_path=elo_db,
+            player_kwargs=player_kwargs,
+            max_workers=workers,
+        )
+        app.run()
+        return
 
     # ELO tracker
     elo_tracker = EloTracker(args.elo_db) if args.elo else None

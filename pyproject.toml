@@ -8,6 +8,7 @@ dependencies = [
     "litellm>=1.80",
     "openai>=2.0",
     "botocore>=1.30",
+    "textual>=0.60",
 ]
 
 [project.scripts]
