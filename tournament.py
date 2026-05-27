@@ -42,7 +42,10 @@ def parse_player_spec(spec: str):
     spec = spec.strip()
 
     if spec.lower() == "human":
-        return HumanPlayer(name="Human"), "human"
+        return HumanPlayer(name="Human"), "human-Human"
+    if spec.startswith("human:"):
+        name = spec.split(":", 1)[1].strip()
+        return HumanPlayer(name=name), f"human-{name}"
     if spec.lower() == "random":
         return RandomPlayer(name="Random"), "random"
     if spec.lower() == "stockfish":
@@ -63,8 +66,13 @@ def parse_player_spec(spec: str):
 def _elo_id_from_spec(spec: str) -> str:
     """Extract the ELO key from a player spec WITHOUT creating a player instance."""
     spec = spec.strip()
-    if spec.lower() in ("human", "random"):
-        return spec.lower()
+    if spec.lower() == "random":
+        return "random"
+    if spec.lower() == "human":
+        return "human-Human"
+    if spec.startswith("human:"):
+        name = spec.split(":", 1)[1].strip()
+        return f"human-{name}"
     if spec.lower() == "stockfish":
         return "stockfish-20"
     if spec.startswith("stockfish:"):

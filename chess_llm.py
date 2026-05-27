@@ -913,9 +913,15 @@ def parse_player(spec: str) -> tuple[str, dict]:
     if spec.lower() == "human":
         return "human", {"name": "Human"}
 
+    # human:NAME syntax — "human:mo" → named human player
+    m = re.match(r"^human:(.+)$", spec, re.IGNORECASE)
+    if m:
+        return "human", {"name": m.group(1).strip()}
+
     if spec.lower() == "random":
         return "random", {"name": "Random"}
 
+    # stockfish and stockfish:N
     if spec.lower() == "stockfish":
         return "stockfish", {"name": "Stockfish"}
 
@@ -1074,7 +1080,8 @@ def main():
     def build_player(spec: str, color: str):
         ptype, kwargs = parse_player(spec)
         if ptype == "human":
-            return HumanPlayer(name=f"Human ({color})")
+            name = kwargs.get("name", "Human")
+            return HumanPlayer(name=f"{name} ({color})")
         elif ptype == "random":
             return RandomPlayer(name=f"Random ({color})")
         elif ptype == "stockfish":
@@ -1138,9 +1145,12 @@ def main():
             if hasattr(player, "skill_level"):
                 return f"stockfish-{player.skill_level}"  # StockfishPlayer
             name = player.name
-            # Strip color suffix: "Human (White)" → "Human"
+            # Strip color suffix: "mo (White)" → "mo"
             if " (" in name:
                 name = name[: name.rindex(" (")] 
+            # Prefix human players to avoid collisions with model names
+            if name.lower() not in ("random",):
+                name = f"human-{name}"
             return name
 
         w_id = _elo_id(white)
