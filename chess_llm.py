@@ -914,6 +914,11 @@ def parse_player(spec: str) -> tuple[str, dict]:
     if spec.lower() == "stockfish":
         return "stockfish", {"name": "Stockfish"}
 
+    # stockfish:N syntax — "stockfish:2" → skill level 2
+    m = re.match(r"^stockfish:(\d+)$", spec, re.IGNORECASE)
+    if m:
+        return "stockfish", {"name": f"Stockfish {m.group(1)}", "skill": int(m.group(1))}
+
     # Otherwise, treat as an LLM model string
     return "llm", {"model": spec, "name": spec}
 
@@ -1063,9 +1068,10 @@ def main():
         elif ptype == "random":
             return RandomPlayer(name=f"Random ({color})")
         elif ptype == "stockfish":
+            skill = kwargs.get("skill", args.stockfish_skill)
             return StockfishPlayer(
-                name=f"Stockfish {args.stockfish_skill} ({color})",
-                skill_level=args.stockfish_skill,
+                name=f"Stockfish {skill} ({color})",
+                skill_level=skill,
                 think_time=args.stockfish_time,
                 binary_path=args.stockfish_path,
             )
