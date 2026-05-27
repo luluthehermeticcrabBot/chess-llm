@@ -152,6 +152,7 @@ class TournamentApp(App):
         yield Static("", id="active-games")
         yield DataTable(id="elo-table", cursor_type="row")
         yield Static("", id="matchup-summary")
+        yield RichLog(id="worker-log", max_lines=20, highlight=True, markup=True)
         yield Footer()
 
     # ── Mount ────────────────────────────────────────────────────────────
@@ -181,17 +182,39 @@ class TournamentApp(App):
                 title="📂 Resume"
             )
 
+        self._tui_log(f"⚙ Tournament: {len(self.models)} players, "
+                      f"{self._total_tasks} tasks, {self.max_workers} workers")
+        self._tui_log(f"📋 Task list: {len(self._task_list)} to run, "
+                      f"{len(self._resume_completed)} already done")
+        self._tui_log("🔧 Starting worker thread...")
+
         # Start workers
         self._start_workers()
         # Poll for results every 200ms
         self.set_interval(0.2, self._poll)
 
+    # ── Thread-safe TUI logging ─────────────────────────────────────────
+
+    def _tui_log(self, msg: str):
+        """Log a message to the visible RichLog widget (thread-safe)."""
+        log_widget = self.query_one("#worker-log", RichLog)
+        log_widget.write(msg)
+
+    def _tui_log_safe(self, msg: str):
+        """Post a log message from any thread."""
+        self.call_from_thread(self._tui_log, msg)
+
     # ── Worker management ────────────────────────────────────────────────
 
     @work(thread=True)
     def _start_workers(self):
-        """Run tournament games in background threads."""
-        import concurrent.futures
+        """Run tournament games sequentially in this thread (no nested executor).
+
+        Each game runs, result goes on the queue, then the next game starts.
+        This avoids ThreadPoolExecutor-within-Textual-thread complexity that
+        causes silent hangs and zero-progress TUI.
+        """
+        self._tui_log_safe("[worker] Starting tournament worker thread")
 
         # Pre-load openings if needed
         openings_list = None
@@ -200,81 +223,72 @@ class TournamentApp(App):
             openings_list = OPENINGS
             import chess as _chess
 
-        _opening_counter = [0]
-        _opening_lock = threading.Lock()
+        _opening_idx = 0
 
         def _get_opening():
+            nonlocal _opening_idx
             if openings_list is None:
                 return None, ""
-            with _opening_lock:
-                idx = _opening_counter[0]
-                _opening_counter[0] += 1
+            idx = _opening_idx
+            _opening_idx += 1
             name, moves, advantage = openings_list[idx % len(openings_list)]
             board = _chess.Board()
             for uci in moves:
                 board.push_uci(uci)
             return board, name
 
-        def _run_one(white_model, black_model):
-            import sys as _sys
-            _mod = _sys.modules.get("__main__")
-            if _mod is None or not hasattr(_mod, "run_match"):
-                from tournament import run_match as _run_match_fn
-            else:
-                _run_match_fn = _mod.run_match
+        if not self._task_list:
+            self._finished = True
+            self._tui_log_safe("[worker] No tasks — exiting")
+            return
+
+        self._tui_log_safe(f"[worker] {len(self._task_list)} tasks to run ({self.max_workers} max-parallel hint)")
+
+        # Resolve run_match once
+        import sys as _sys
+        _mod = _sys.modules.get("__main__")
+        if _mod is not None and hasattr(_mod, "run_match"):
+            _run_match_fn = _mod.run_match
+        else:
+            from tournament import run_match as _run_match_fn
+        self._tui_log_safe(f"[worker] run_match resolved: {_run_match_fn}")
+
+        for idx, (wm, bm) in enumerate(self._task_list):
+            if self._stop_flag.is_set():
+                self._tui_log_safe(f"[worker] Stop flag set — aborting at task {idx}/{len(self._task_list)}")
+                break
+
+            with self._lock:
+                tid = self._task_id
+                self._task_id += 1
+                self._active[tid] = (wm, bm, time.time())
+            self._tui_log_safe(f"[worker] Starting task {idx}: {wm} vs {bm}")
+
             board, oname = _get_opening()
             try:
-                import sys, io
+                import io
                 old_stdout = sys.stdout
                 sys.stdout = io.StringIO()
                 try:
                     result = _run_match_fn(
-                        white_model, black_model,
+                        wm, bm,
                         delay=self.delay, elo_tracker=None,
                         starting_board=board, opening_name=oname,
                         **self.player_kwargs,
                     )
                 finally:
                     sys.stdout = old_stdout
-                self._results_queue.put((white_model, black_model, result))
+                self._results_queue.put((wm, bm, result))
+                self._tui_log_safe(f"[worker] Task {idx} done: {result}")
             except Exception as e:
-                self._results_queue.put((white_model, black_model, "error"))
+                self._tui_log_safe(f"[worker] Task {idx} FAILED: {e}")
+                self._results_queue.put((wm, bm, "error"))
 
-        if not self._task_list:
-            self._finished = True
-            return
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {}
-            for wm, bm in self._task_list:
-                with self._lock:
-                    tid = self._task_id
-                    self._task_id += 1
-                    self._active[tid] = (wm, bm, time.time())
-                f = executor.submit(_run_one, wm, bm)
-                futures[f] = tid
-
-            # Wait for completion with interruptible loop
-            pending = set(futures.keys())
-            while pending:
-                done, pending = concurrent.futures.wait(
-                    pending, timeout=0.5,
-                    return_when=concurrent.futures.FIRST_COMPLETED,
-                )
-                for f in done:
-                    try:
-                        f.result(timeout=0)
-                    except Exception:
-                        pass
-                    with self._lock:
-                        tid = futures.pop(f, None)
-                        if tid is not None:
-                            self._active.pop(tid, None)
-                if self._stop_flag.is_set():
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
+            with self._lock:
+                self._active.pop(tid, None)
 
         self._finished = True
+        self._tui_log_safe("[worker] All tasks complete")
 
     # ── Polling ──────────────────────────────────────────────────────────
 
