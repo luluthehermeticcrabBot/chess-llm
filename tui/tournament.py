@@ -245,8 +245,8 @@ class TournamentApp(App):
         self._tui_log_safe(f"[worker] {len(self._task_list)} tasks to run ({self.max_workers} max-parallel hint)")
 
         # Resolve run_match once
-        import sys as _sys
-        _mod = _sys.modules.get("__main__")
+        import sys
+        _mod = sys.modules.get("__main__")
         if _mod is not None and hasattr(_mod, "run_match"):
             _run_match_fn = _mod.run_match
         else:
