@@ -254,19 +254,22 @@ class TournamentApp(App):
                 f = executor.submit(_run_one, wm, bm)
                 futures[f] = tid
 
-            # Wait for completion with interruptible as_completed loop
-            for f in concurrent.futures.as_completed(futures):
-                try:
-                    f.result(timeout=1)  # short timeout to check stop flag
-                except concurrent.futures.TimeoutError:
-                    pass  # keep waiting
-                except Exception:
-                    pass
-                with self._lock:
-                    tid = futures.pop(f, None)
-                    if tid is not None:
-                        self._active.pop(tid, None)
-                # Check stop flag every iteration
+            # Wait for completion with interruptible loop
+            pending = set(futures.keys())
+            while pending:
+                done, pending = concurrent.futures.wait(
+                    pending, timeout=0.5,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for f in done:
+                    try:
+                        f.result(timeout=0)
+                    except Exception:
+                        pass
+                    with self._lock:
+                        tid = futures.pop(f, None)
+                        if tid is not None:
+                            self._active.pop(tid, None)
                 if self._stop_flag.is_set():
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
