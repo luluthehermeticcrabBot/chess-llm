@@ -44,7 +44,7 @@ def parse_player_spec(spec: str):
     if spec.lower() == "random":
         return RandomPlayer(name="Random"), "random"
     if spec.lower() == "stockfish":
-        return StockfishPlayer(name="Stockfish 20", skill_level=20), "stockfish"
+        return StockfishPlayer(name="Stockfish 20", skill_level=20), "stockfish-20"
     if spec.startswith("stockfish:"):
         skill = int(spec.split(":")[1])
         return StockfishPlayer(name=f"Stockfish {skill}", skill_level=skill), f"stockfish-{skill}"
