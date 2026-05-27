@@ -216,14 +216,21 @@ class TournamentApp(App):
             return board, name
 
         def _run_one(white_model, black_model):
-            from tournament import run_match
+            # Import run_match from the running module (handles both
+            # 'python tournament.py' and 'python -m tournament' cases)
+            import sys as _sys
+            _mod = _sys.modules.get("__main__")
+            if _mod is None or not hasattr(_mod, "run_match"):
+                from tournament import run_match as _run_match_fn
+            else:
+                _run_match_fn = _mod.run_match
             board, oname = _get_opening()
             try:
                 import sys, io
                 old_stdout = sys.stdout
                 sys.stdout = io.StringIO()
                 try:
-                    result = run_match(
+                    result = _run_match_fn(
                         white_model, black_model,
                         delay=self.delay, elo_tracker=None,
                         starting_board=board, opening_name=oname,
