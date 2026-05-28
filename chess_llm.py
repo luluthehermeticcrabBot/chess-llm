@@ -500,12 +500,13 @@ class LLMPlayer:
 
         return textwrap.dedent(f"""\
         You are {color} in a chess game.
-        Pick ONE legal UCI move from this list.
+        Pick ONE UCI move from the list below.
+        Do NOT guess from memory — the board may have changed.
 
         Legal UCI moves: {', '.join(capped)}
 
         Output exactly: MOVE: <uci>
-        Example: MOVE: e2e4
+        Example: MOVE: {capped[0]}
 
         Nothing else. No explanation.""")
 
@@ -674,6 +675,11 @@ class LLMPlayer:
 
                 corrections.append(error_msg)
                 messages[:] = [{"role": "user", "content": "\n\n---\n\n".join(corrections)}]
+                # For tiny models, prepend the correction to the system prompt
+                # so it's treated as an authoritative instruction, not a chat
+                # message (which some Jinja templates weakly attend to).
+                if self.tiny:
+                    system = f"CORRECTION: {error_msg}\n\n{self._build_tiny_system(board)}"
                 # Auto-disable tools for subsequent attempts if model ignored them
                 if attempt >= 2 and self.use_tools and not used_tools:
                     self.use_tools = False
@@ -699,6 +705,8 @@ class LLMPlayer:
                 )
                 corrections.append(error_msg)
                 messages[:] = [{"role": "user", "content": "\n\n---\n\n".join(corrections)}]
+                if self.tiny:
+                    system = f"CORRECTION: {error_msg}\n\n{self._build_tiny_system(board)}"
                 continue
 
             if move in board.legal_moves:
@@ -725,6 +733,8 @@ class LLMPlayer:
                     )
                 corrections.append(error_msg)
                 messages[:] = [{"role": "user", "content": "\n\n---\n\n".join(corrections)}]
+                if self.tiny:
+                    system = f"CORRECTION: {error_msg}\n\n{self._build_tiny_system(board)}"
 
         # Exhausted retries
         raise IllegalMoveForfeit(
