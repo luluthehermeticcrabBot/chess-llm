@@ -632,26 +632,45 @@ class LLMPlayer:
 
             if not proposed_uci:
                 # Escalating urgency — by attempt 3 we just demand the UCI
-                legal_san = [board.san(m) for m in board.legal_moves][:20]
-
-                if attempt == 1:
-                    hint = ""
-                    if self.use_tools and not used_tools:
-                        hint = " This model may not support tool calling — try --no-tools."
-                    error_msg = (
-                        f"You did not provide a legal move.{hint}\n"
-                        f"Pick one of these: {', '.join(legal_san)}.\n"
-                        f"Output a UCI move like e2e4 or g1f3."
-                    )
-                elif attempt == 2:
-                    error_msg = (
-                        f"STOP REASONING. Output ONLY a UCI move. No explanation.\n"
-                        f"Pick one: {', '.join(legal_san[:10])}"
-                    )
+                if self.tiny:
+                    legal_uci = [m.uci() for m in board.legal_moves][:20]
+                    if attempt == 1:
+                        error_msg = (
+                            f"WRONG FORMAT. You must output exactly: MOVE: <uci>\n"
+                            f"Example: MOVE: {legal_uci[0]}\n"
+                            f"Pick from: {', '.join(legal_uci[:15])}"
+                        )
+                    elif attempt == 2:
+                        error_msg = (
+                            f"STILL WRONG. Copy one of these exactly:\n"
+                            f"{', '.join(legal_uci[:12])}\n"
+                            f"Output: MOVE: <one from the list>"
+                        )
+                    else:
+                        error_msg = (
+                            f"LAST CHANCE. MOVE: {legal_uci[0]}"
+                        )
                 else:
-                    error_msg = (
-                        f"JUST THE UCI. ONE STRING. Example: {legal_san[0] if legal_san else 'e2e4'}"
-                    )
+                    legal_san = [board.san(m) for m in board.legal_moves][:20]
+
+                    if attempt == 1:
+                        hint = ""
+                        if self.use_tools and not used_tools:
+                            hint = " This model may not support tool calling — try --no-tools."
+                        error_msg = (
+                            f"You did not provide a legal move.{hint}\n"
+                            f"Pick one of these: {', '.join(legal_san)}.\n"
+                            f"Output a UCI move like e2e4 or g1f3."
+                        )
+                    elif attempt == 2:
+                        error_msg = (
+                            f"STOP REASONING. Output ONLY a UCI move. No explanation.\n"
+                            f"Pick one: {', '.join(legal_san[:10])}"
+                        )
+                    else:
+                        error_msg = (
+                            f"JUST THE UCI. ONE STRING. Example: {legal_san[0] if legal_san else 'e2e4'}"
+                        )
 
                 corrections.append(error_msg)
                 messages[:] = [{"role": "user", "content": "\n\n---\n\n".join(corrections)}]
@@ -686,13 +705,24 @@ class LLMPlayer:
                 return move
             else:
                 self.illegal_count += 1
-                explanation = _explain_illegal(board, proposed_uci)
-                legal_san = [board.san(m) for m in board.legal_moves][:30]
-                error_msg = (
-                    f"Illegal move: {explanation}\n"
-                    f"Some legal moves: {', '.join(legal_san)}.\n"
-                    f"Please pick a legal move."
-                )
+                if self.tiny:
+                    # Tiny models often output moves from rote memory
+                    # (e.g. e2e4) instead of checking the legal list.
+                    # Be explicit: the move they picked isn't in the list.
+                    legal_uci = [m.uci() for m in board.legal_moves][:15]
+                    error_msg = (
+                        f"{proposed_uci} is NOT in the legal moves list. "
+                        f"Do NOT guess from memory — copy from this list:\n"
+                        f"{', '.join(legal_uci)}"
+                    )
+                else:
+                    explanation = _explain_illegal(board, proposed_uci)
+                    legal_san = [board.san(m) for m in board.legal_moves][:30]
+                    error_msg = (
+                        f"Illegal move: {explanation}\n"
+                        f"Some legal moves: {', '.join(legal_san)}.\n"
+                        f"Please pick a legal move."
+                    )
                 corrections.append(error_msg)
                 messages[:] = [{"role": "user", "content": "\n\n---\n\n".join(corrections)}]
 
@@ -1217,11 +1247,14 @@ def main():
         if hasattr(p, "check_connectivity"):
             p.check_connectivity()
 
+    tools_label = "off" if args.no_tools or args.tiny else "on"
+    if args.tiny:
+        tools_label += " (tiny mode)"
     print(f"\n♟  LLM Chess Match")
     print(f"   White: {white.name}")
     print(f"   Black: {black.name}")
     print(f"   Delay: {args.delay}s  |  Retries: {args.retries}  |  "
-          f"Tools: {'on' if not args.no_tools else 'off'}")
+          f"Tools: {tools_label}")
 
     match = ChessMatch(white, black, delay=args.delay)
     result = match.play()
