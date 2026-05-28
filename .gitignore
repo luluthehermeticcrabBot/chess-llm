@@ -12,3 +12,4 @@ games/*.pgn
 
 # OS
 .DS_Store
+ratings.json
