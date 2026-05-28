@@ -224,13 +224,13 @@ class TournamentApp(App):
 
     @work(thread=True)
     def _start_workers(self):
-        """Run tournament games sequentially in this thread (no nested executor).
+        """Run tournament games using ThreadPoolExecutor for true parallelism.
 
-        Each game runs, result goes on the queue, then the next game starts.
-        This avoids ThreadPoolExecutor-within-Textual-thread complexity that
-        causes silent hangs and zero-progress TUI.
+        Each game runs in its own thread. Results go onto a queue and are
+        drained by the Textual poll loop. The max_workers cap limits how many
+        games run at once — set by --parallel.
         """
-        self._tui_log_safe("[worker] Starting tournament worker thread")
+        self._tui_log_safe(f"[worker] Starting tournament with {self.max_workers} workers")
 
         # Pre-load openings if needed
         openings_list = None
@@ -239,14 +239,15 @@ class TournamentApp(App):
             openings_list = OPENINGS
             import chess as _chess
 
-        _opening_idx = 0
+        _opening_idx = [0]  # list for mutable closure capture
+        _opening_lock = threading.Lock()
 
         def _get_opening():
-            nonlocal _opening_idx
             if openings_list is None:
                 return None, ""
-            idx = _opening_idx
-            _opening_idx += 1
+            with _opening_lock:
+                idx = _opening_idx[0]
+                _opening_idx[0] += 1
             name, moves, advantage = openings_list[idx % len(openings_list)]
             board = _chess.Board()
             for uci in moves:
@@ -258,7 +259,8 @@ class TournamentApp(App):
             self._tui_log_safe("[worker] No tasks — exiting")
             return
 
-        self._tui_log_safe(f"[worker] {len(self._task_list)} tasks to run ({self.max_workers} max-parallel hint)")
+        self._tui_log_safe(f"[worker] {len(self._task_list)} tasks, "
+                          f"{self.max_workers} parallel workers")
 
         # Resolve run_match once
         import sys
@@ -269,16 +271,19 @@ class TournamentApp(App):
             from tournament import run_match as _run_match_fn
         self._tui_log_safe(f"[worker] run_match resolved: {_run_match_fn}")
 
-        for idx, (wm, bm) in enumerate(self._task_list):
-            if self._stop_flag.is_set():
-                self._tui_log_safe(f"[worker] Stop flag set — aborting at task {idx}/{len(self._task_list)}")
-                break
+        # ── Thread-safe task dispatch ──────────────────────────────────
+        import concurrent.futures
+        _idx_counter = [0]
+
+        def _run_one(wm: str, bm: str):
+            """Run a single game and put result on queue."""
+            idx = _idx_counter[0]
+            _idx_counter[0] += 1
 
             with self._lock:
                 tid = self._task_id
                 self._task_id += 1
                 self._active[tid] = (wm, bm, time.time())
-            self._tui_log_safe(f"[worker] Starting task {idx}: {wm} vs {bm}")
 
             board, oname = _get_opening()
             try:
@@ -295,13 +300,30 @@ class TournamentApp(App):
                 finally:
                     sys.stdout = old_stdout
                 self._results_queue.put((wm, bm, result))
-                self._tui_log_safe(f"[worker] Task {idx} done: {result}")
             except Exception as e:
                 self._tui_log_safe(f"[worker] Task {idx} FAILED: {e}")
                 self._results_queue.put((wm, bm, "error"))
+            finally:
+                with self._lock:
+                    self._active.pop(tid, None)
 
-            with self._lock:
-                self._active.pop(tid, None)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.max_workers
+        ) as executor:
+            futures = []
+            for wm, bm in self._task_list:
+                if self._stop_flag.is_set():
+                    break
+                futures.append(executor.submit(_run_one, wm, bm))
+
+            # Wait for all futures to complete
+            for future in concurrent.futures.as_completed(futures):
+                if self._stop_flag.is_set():
+                    break
+                try:
+                    future.result()  # catch any unhandled exceptions
+                except Exception:
+                    pass
 
         self._finished = True
         self._tui_log_safe("[worker] All tasks complete")

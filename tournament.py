@@ -396,6 +396,14 @@ def main():
     parser.add_argument("--elo-db", default="ratings.json")
     parser.add_argument("--no-tools", action="store_true",
                         help="Disable tool calling for LLM players")
+    parser.add_argument("--tiny", action="store_true",
+                        help="Tiny-model mode: compact UCI-only prompt for models <20B. "
+                             "Forces --no-tools, strips FEN, uses strict MOVE: <uci> format.")
+    parser.add_argument("--reasoning", choices=["low", "medium", "high"],
+                        default=None,
+                        help="Reasoning effort for providers that support it "
+                             "(OpenRouter/OpenAI: reasoning_effort; Anthropic: thinking budget). "
+                             "Omit for provider default.")
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--temperature", type=float, default=0.3)
     parser.add_argument("--timeout", type=int, default=120)
@@ -488,6 +496,8 @@ def main():
                     timeout=args.timeout,
                     threads=args.stockfish_threads,
                     think_time=args.stockfish_time,
+                    tiny=args.tiny,
+                    reasoning=args.reasoning,
                 )
                 elo_db = args.elo_db if args.elo else None
 
@@ -519,6 +529,8 @@ def main():
         timeout=args.timeout,
         threads=args.stockfish_threads,
         think_time=args.stockfish_time,
+        tiny=args.tiny,
+        reasoning=args.reasoning,
     )
 
     if args.round_robin:

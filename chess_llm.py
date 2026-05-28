@@ -136,9 +136,18 @@ def _call_llm(
     api_key: str | None = None,
     timeout: int = 120,
     max_tokens: int | None = None,
+    reasoning: str | None = None,
+    tiny: bool = False,
 ) -> dict:
-    """Thin wrapper around litellm. Returns {'content': str, 'tool_calls': [...]}."""
+    """Thin wrapper around litellm. Returns {'content': str, 'tool_calls': [...]}.
+
+    reasoning: None (default), 'low', 'medium', 'high' — maps to provider-specific
+    reasoning effort controls (OpenRouter/OpenAI/DeepSeek: reasoning_effort;
+    Anthropic: thinking budget).
+    tiny: if True, uses minimal max_tokens (models <20B don't need long outputs).
+    """
     import litellm
+    import random as _random
 
     # Quiet litellm (redundant with module-level, but belt-and-suspenders)
     litellm.suppress_debug_info = True
@@ -158,29 +167,35 @@ def _call_llm(
     else:
         full_messages.append({"role": "user", "content": "Continue."})
 
+    # ── Build kwargs ───────────────────────────────────────────────────
     kwargs = dict(
         model=resolved_model,
         messages=full_messages,
         temperature=temperature,
-        max_tokens=max_tokens or (2048 if tools else 4096),
+        max_tokens=max_tokens or (128 if tiny else (1024 if tools else 256)),
         timeout=timeout,
         api_base=effective_base,
         api_key=effective_key,
     )
-    if tools:
+    if tools and not tiny:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
 
-    # Hard timeout via thread — litellm's timeout is unreliable for some providers
+    # ── Reasoning effort (provider-specific) ───────────────────────────
+    if reasoning:
+        _apply_reasoning(kwargs, resolved_model, reasoning)
+
+    # ── Hard timeout via thread (litellm's timeout is unreliable) ──────
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(litellm.completion, **kwargs)
         try:
-            response = future.result(timeout=timeout + 10)
+            response = future.result(timeout=timeout + 15)
         except concurrent.futures.TimeoutError:
             raise TimeoutError(
-                f"No response from {resolved_model} after {timeout + 10}s. "
-                f"Is the provider running? For Ollama, check: ollama ps"
+                f"No response from {resolved_model} after {timeout + 15}s. "
+                f"Local model may be overloaded — try fewer parallel games "
+                f"or increase --timeout."
             )
     choice = response.choices[0].message
 
@@ -197,6 +212,31 @@ def _call_llm(
             for tc in choice.tool_calls
         ]
     return result
+
+
+def _apply_reasoning(kwargs: dict, model: str, level: str) -> None:
+    """Map a human-friendly reasoning level to provider-specific API params.
+
+    Providers and their reasoning mechanisms:
+      - OpenRouter / OpenAI / OpenCode / DeepSeek: reasoning_effort
+      - Anthropic: thinking.type + thinking.budget_tokens
+      - Ollama / DMR / others: no equivalent (silently skip)
+    """
+    model_lower = model.lower()
+
+    # Budget tokens mapped to reasoning level
+    budget_map = {"low": 256, "medium": 1024, "high": 4096}
+    budget = budget_map.get(level, 256)
+
+    # Anthropic-style thinking (Claude models)
+    if "claude" in model_lower or "anthropic" in model_lower:
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        kwargs["temperature"] = 1.0  # Anthropic requires temp=1 with thinking
+        return
+
+    # OpenAI / OpenRouter / OpenCode / DeepSeek — use reasoning_effort
+    # (also works for openrouter/anthropic/... via OpenRouter's API)
+    kwargs["reasoning_effort"] = level
 
 
 # ── Move extraction ──────────────────────────────────────────────────────────
@@ -370,15 +410,19 @@ class LLMPlayer:
         use_tools: bool = True,
         temperature: float = 0.3,
         timeout: int = 120,
+        tiny: bool = False,
+        reasoning: str | None = None,
     ):
         self.model = model
         self.name = name or model
         self.api_base = api_base or os.environ.get("LLM_CHESS_API_BASE")
         self.api_key = api_key or os.environ.get("LLM_CHESS_API_KEY")
         self.max_retries = max_retries
-        self.use_tools = use_tools
+        self.use_tools = use_tools and not tiny  # tiny mode forces no-tools
         self.temperature = temperature
         self.timeout = timeout
+        self.tiny = tiny
+        self.reasoning = reasoning  # None, "low", "medium", "high"
         self.illegal_count = 0  # stats
 
     def check_connectivity(self) -> bool:
@@ -421,27 +465,49 @@ class LLMPlayer:
         return True
 
     def _build_system(self, board: chess.Board, history_text: str) -> str:
+        """Build system prompt: standard mode or tiny mode for sub-20B models."""
+        if self.tiny:
+            return self._build_tiny_system(board)
+
         color = "White" if board.turn == chess.WHITE else "Black"
-        legal_moves = [board.san(m) for m in board.legal_moves]
-        capped = legal_moves[:60]
-        suffix = f" ... and {len(legal_moves) - 60} more" if len(legal_moves) > 60 else ""
+        # Build legal moves in both UCI and SAN — smaller models benefit from
+        # seeing the same format they're expected to output.
+        legal_uci = [m.uci() for m in board.legal_moves]
+        capped = legal_uci[:50]
+        suffix = f" ... and {len(legal_uci) - 50} more" if len(legal_uci) > 50 else ""
+
         return textwrap.dedent(f"""\
-        You are playing chess as **{color}**. You are a strong chess player.
-        Think carefully about the position, then submit your move.
+        You are playing chess as **{color}**. Pick the best legal move.
 
-        ## Current board (FEN)
-        {board.fen()}
-
-        ## Legal moves
+        ## Legal UCI moves (use one of these)
         {', '.join(capped)}{suffix}
 
-        ## Game history (PGN summary)
-        {history_text if history_text else "(opening — first move)"}
+        ## Board position (FEN — for reference)
+        {board.fen()}
+
+        ## Recent moves
+        {history_text if history_text else "(opening)"}
 
         ## Instructions
-        1. Reason about the position step by step (material, king safety, piece activity, tactics).
-        2. Pick the best legal move.
-        3. Output ONLY your move using the make_move tool.""")
+        Pick a move from the legal list above. {"Call the make_move tool with your chosen UCI." if self.use_tools else "Respond with ONLY the UCI string, nothing else."}
+        UCI format: from-square to-square, e.g. e2e4, g1f3, e7e8q (promotion).""")
+
+    def _build_tiny_system(self, board: chess.Board) -> str:
+        """Compact prompt for models under ~20B params — no FEN, UCI-only, strict format."""
+        color = "White" if board.turn == chess.WHITE else "Black"
+        legal_uci = [m.uci() for m in board.legal_moves]
+        capped = legal_uci[:30]
+
+        return textwrap.dedent(f"""\
+        You are {color} in a chess game.
+        Pick ONE legal UCI move from this list.
+
+        Legal UCI moves: {', '.join(capped)}
+
+        Output exactly: MOVE: <uci>
+        Example: MOVE: e2e4
+
+        Nothing else. No explanation.""")
 
     _TOOLS = [{
         "type": "function",
@@ -463,11 +529,15 @@ class LLMPlayer:
 
     def get_move(self, board: chess.Board, history_text: str) -> chess.Move:
         """Get a legal move from the LLM, with retries for illegal moves."""
+        import random as _random
         messages = []
         # Accumulate correction text to avoid consecutive user messages,
         # which violate llama.cpp / DMR Jinja chat templates.
         corrections: list[str] = []
         system = self._build_system(board, history_text)
+
+        # Progressive timeout: first attempt uses base timeout, each retry adds 50%
+        current_timeout = self.timeout
 
         for attempt in range(1, self.max_retries + 1):
             was_retry = attempt > 1
@@ -483,13 +553,26 @@ class LLMPlayer:
                     temperature=self.temperature,
                     api_base=self.api_base,
                     api_key=self.api_key,
-                    timeout=self.timeout,
+                    timeout=current_timeout,
+                    reasoning=self.reasoning,
+                    tiny=self.tiny,
                 )
+            except TimeoutError as e:
+                if attempt < self.max_retries:
+                    wait = 2 ** attempt + _random.uniform(0, 1)
+                    current_timeout = int(current_timeout * 1.5)
+                    print(f"  ⚠ {self.name}: timeout ({e}), retrying in {wait:.1f}s "
+                          f"(timeout now {current_timeout}s)...")
+                    time.sleep(wait)
+                    continue
+                raise IllegalMoveForfeit(
+                    f"{self.name} timed out after {self.max_retries} attempts"
+                ) from e
             except Exception as e:
                 # Network error, API error, rate limit, etc.
                 if attempt < self.max_retries:
-                    wait = 2 ** attempt
-                    print(f"  ⚠ {self.name}: API error ({e}), retrying in {wait}s...")
+                    wait = 2 ** attempt + _random.uniform(0, 1)
+                    print(f"  ⚠ {self.name}: API error ({e}), retrying in {wait:.1f}s...")
                     time.sleep(wait)
                     continue
                 # Exhausted retries — forfeit gracefully instead of crashing
@@ -989,6 +1072,16 @@ def main():
         help="Disable tool calling — use text parsing instead (for models that don't support tools)",
     )
     parser.add_argument(
+        "--tiny", action="store_true",
+        help="Tiny-model mode: compact UCI-only prompt for models <20B. "
+             "Forces --no-tools, strips FEN, uses strict MOVE: <uci> format.",
+    )
+    parser.add_argument(
+        "--reasoning", choices=["low", "medium", "high"], default=None,
+        help="Reasoning effort for providers that support it "
+             "(OpenRouter/OpenAI: reasoning_effort; Anthropic: thinking budget).",
+    )
+    parser.add_argument(
         "--temperature", "-t", type=float, default=0.3,
         help="LLM temperature (default: 0.3)",
     )
@@ -1109,9 +1202,11 @@ def main():
                 api_base=args.api_base,
                 api_key=args.api_key,
                 max_retries=args.retries,
-                use_tools=not args.no_tools,
+                use_tools=not args.no_tools and not args.tiny,
                 temperature=args.temperature,
                 timeout=args.timeout,
+                tiny=args.tiny,
+                reasoning=args.reasoning,
             )
 
     white = build_player(args.white, "White")
