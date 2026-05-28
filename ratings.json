@@ -1,0 +1,16 @@
+{
+  "stockfish-15": {
+    "rating": 1194,
+    "games": 2,
+    "wins": 1,
+    "losses": 1,
+    "draws": 0
+  },
+  "stockfish-10": {
+    "rating": 1194,
+    "games": 2,
+    "wins": 1,
+    "losses": 1,
+    "draws": 0
+  }
+}

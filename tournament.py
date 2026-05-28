@@ -51,7 +51,8 @@ def parse_player_spec(spec: str):
     if spec.lower() == "stockfish":
         return StockfishPlayer(name="Stockfish 20", skill_level=20), "stockfish-20"
     if spec.startswith("stockfish:"):
-        skill = int(spec.split(":")[1])
+        skill_str = spec.split(":", 1)[1].strip()
+        skill = int(skill_str) if skill_str else 20
         return StockfishPlayer(name=f"Stockfish {skill}", skill_level=skill), f"stockfish-{skill}"
 
     # LLM player
@@ -76,7 +77,8 @@ def _elo_id_from_spec(spec: str) -> str:
     if spec.lower() == "stockfish":
         return "stockfish-20"
     if spec.startswith("stockfish:"):
-        skill = int(spec.split(":")[1])
+        skill_str = spec.split(":", 1)[1].strip()
+        skill = int(skill_str) if skill_str else 20
         return f"stockfish-{skill}"
     return spec
 
