@@ -799,6 +799,13 @@ class ChessMatch:
         self.pgn_game.headers["White"] = white.name
         self.pgn_game.headers["Black"] = black.name
         self.node = self.pgn_game
+        # Seed PGN with opening moves so _history_text() can walk the
+        # game tree without creating a board/PGN mismatch (the PGN
+        # internal board starts from the standard position; moves that
+        # are legal only after the opening would crash the exporter).
+        if starting_board and starting_board.move_stack:
+            for move in starting_board.move_stack:
+                self.node = self.node.add_variation(move)
 
     def _history_text(self) -> str:
         """Return a compact PGN summary of moves so far."""
