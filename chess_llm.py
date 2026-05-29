@@ -183,10 +183,11 @@ def _call_llm(
     # Big Pickle Proxy → DeepSeek models count reasoning_content toward
     # max_tokens. The chess prompt leaves zero tokens for the answer if
     # the model thinks too long. Per-model bumps:
-    #   big-pickle (DeepSeek V3): 4096 — very verbose reasoning
-    #   deepseek-v4-flash-free:   2048 — faster, needs less headroom
-    #   nemotron-3-super-free, mimo-v2.5-free: no bump needed (no separate
-    #     reasoning_content)
+    #   big-pickle (DeepSeek V3):  4096 — very verbose reasoning
+    #   deepseek-v4-flash-free:    2048 — flash model, needs less headroom
+    #   nemotron-3-super-free,
+    #   mimo-v2.5-free:            2048 — embedding reasoning in content
+    #                                  (same headroom as flash-free)
     # On retry, increase by 50% per attempt.
     if model.startswith("bigpickle/") and not max_tokens:
         if "big-pickle" in model:
@@ -194,7 +195,7 @@ def _call_llm(
         elif "deepseek" in model:
             _floor = 2048
         else:
-            _floor = 512  # nemotron, mimo — no reasoning tokens, just safety
+            _floor = 2048  # nemotron, mimo — inline reasoning in content
         if _mt < _floor:
             _mt = _floor
     if retry_attempt > 0:
