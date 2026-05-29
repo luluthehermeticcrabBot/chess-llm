@@ -148,6 +148,7 @@ def _call_llm(
     max_tokens: int | None = None,
     reasoning: str | None = None,
     tiny: bool = False,
+    retry_attempt: int = 0,
 ) -> dict:
     """Thin wrapper around litellm. Returns {'content': str, 'tool_calls': [...]}.
 
@@ -179,17 +180,25 @@ def _call_llm(
 
     # ── Build kwargs ───────────────────────────────────────────────────
     _mt = max_tokens or (128 if tiny else (1024 if tools else 256))
-    # Big Pickle Proxy → DeepSeek models (big-pickle, deepseek-v4-flash-free)
-    # count reasoning_content toward max_tokens. The chess prompt (FEN +
-    # legal moves + PGN history) leaves zero tokens for the answer if the
-    # model thinks too long. Bump to 4096 — reasoning can consume 3000+
-    # tokens on mid-game positions, and retry correction messages make the
-    # prompt even longer each attempt.
-    # Non-DeepSeek free models (nemotron-3-super-free, mimo-v2.5-free)
-    # don't have separate reasoning_content, so they're fine with defaults.
-    if (model.startswith("bigpickle/")
-            and not max_tokens and _mt < 4096):
-        _mt = 4096
+    # Big Pickle Proxy → DeepSeek models count reasoning_content toward
+    # max_tokens. The chess prompt leaves zero tokens for the answer if
+    # the model thinks too long. Per-model bumps:
+    #   big-pickle (DeepSeek V3): 4096 — very verbose reasoning
+    #   deepseek-v4-flash-free:   2048 — faster, needs less headroom
+    #   nemotron-3-super-free, mimo-v2.5-free: no bump needed (no separate
+    #     reasoning_content)
+    # On retry, increase by 50% per attempt.
+    if model.startswith("bigpickle/") and not max_tokens:
+        if "big-pickle" in model:
+            _floor = 4096
+        elif "deepseek" in model:
+            _floor = 2048
+        else:
+            _floor = 512  # nemotron, mimo — no reasoning tokens, just safety
+        if _mt < _floor:
+            _mt = _floor
+    if retry_attempt > 0:
+        _mt = int(_mt * (1.0 + 0.5 * retry_attempt))
     kwargs = dict(
         model=resolved_model,
         messages=full_messages,
@@ -561,6 +570,7 @@ class LLMPlayer:
 
         # Progressive timeout: first attempt uses base timeout, each retry adds 50%
         current_timeout = self.timeout
+        empty_retries = 0  # how many times we've retried due to empty responses
 
         for attempt in range(1, self.max_retries + 1):
             was_retry = attempt > 1
@@ -579,6 +589,7 @@ class LLMPlayer:
                     timeout=current_timeout,
                     reasoning=self.reasoning,
                     tiny=self.tiny,
+                    retry_attempt=empty_retries,
                 )
             except TimeoutError as e:
                 if attempt < self.max_retries:
@@ -625,6 +636,7 @@ class LLMPlayer:
             # (the model didn't refuse — it just returned nothing at all)
             if not content and not tool_calls:
                 if attempt < self.max_retries:
+                    empty_retries += 1
                     wait = 2 ** attempt
                     hint = ""
                     if self.use_tools and attempt == 1:
