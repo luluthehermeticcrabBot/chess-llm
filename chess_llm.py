@@ -179,12 +179,15 @@ def _call_llm(
 
     # ── Build kwargs ───────────────────────────────────────────────────
     _mt = max_tokens or (128 if tiny else (1024 if tools else 256))
-    # Reasoning models (big-pickle / DeepSeek V3) count thinking tokens
-    # against max_tokens. The chess prompt (FEN + legal moves + PGN history)
-    # can leave zero tokens for the answer if the model thinks too long.
-    # Bump to 4096 — reasoning can consume 3000+ tokens on mid-game positions,
-    # and retry correction messages make the prompt even longer each attempt.
-    if (resolved_model and "big-pickle" in resolved_model.lower()
+    # Big Pickle Proxy → DeepSeek models (big-pickle, deepseek-v4-flash-free)
+    # count reasoning_content toward max_tokens. The chess prompt (FEN +
+    # legal moves + PGN history) leaves zero tokens for the answer if the
+    # model thinks too long. Bump to 4096 — reasoning can consume 3000+
+    # tokens on mid-game positions, and retry correction messages make the
+    # prompt even longer each attempt.
+    # Non-DeepSeek free models (nemotron-3-super-free, mimo-v2.5-free)
+    # don't have separate reasoning_content, so they're fine with defaults.
+    if (model.startswith("bigpickle/")
             and not max_tokens and _mt < 4096):
         _mt = 4096
     kwargs = dict(
