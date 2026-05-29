@@ -647,6 +647,10 @@ class LLMPlayer:
                     # Auto-disable tools for retry 2+ if model returned nothing
                     if attempt >= 2 and self.use_tools:
                         self.use_tools = False
+                        # Rebuild system prompt to match — the old one says
+                        # "Call the make_move tool" but no tools are provided,
+                        # which confuses reasoning models and wastes tokens.
+                        system = self._build_system(board, history_text)
                     continue
                 # Final attempt also empty — give up gracefully
                 tip = " Try --no-tools if the model doesn't support tool calling." if self.use_tools else ""
