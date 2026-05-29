@@ -16,6 +16,7 @@ Provider shortcuts (auto-detect API key from env):
   anthropic/claude-sonnet-4     →  native Anthropic API            ($ANTHROPIC_API_KEY)
   groq/llama-3.3-70b            →  native Groq API                ($GROQ_API_KEY)
   ollama/llama3                 →  local Ollama                    (no key needed)
+  bigpickle/big-pickle          →  local Big Pickle Proxy :8000    (no key needed)
 
 Usage:
   python chess_llm.py                          # LLM vs LLM (default models)
@@ -70,6 +71,12 @@ PROVIDER_PRESETS: dict[str, tuple[str, str]] = {
     # Uses llama.cpp under the hood for GGUF models, vLLM for safetensors.
     # Port 12434, no real API key needed.
     "docker":       ("http://localhost:12434/engines/v1", None),
+    # Big Pickle Proxy — OpenAI-compatible proxy that forwards to OpenCode Zen.
+    # No API key needed (uses UUID auth internally). Run proxy.py --port 8000 first.
+    # Free models: big-pickle, deepseek-v4-flash-free, nemotron-3-super-free, mimo-v2.5-free
+    # NOTE: The proxy strips reasoning_effort from forwarded requests, so
+    # --reasoning has no effect through this provider (documented, not an error).
+    "bigpickle":    ("http://localhost:8000/v1", None),
 }
 
 
@@ -99,6 +106,9 @@ def _resolve_provider(model: str) -> tuple[str, str | None, str | None]:
                 api_key = "ollama"
             # Docker Model Runner accepts any API key; "not-needed" is canonical.
             if prefix == "docker":
+                api_key = "not-needed"
+            # Big Pickle Proxy also doesn't validate API keys
+            if prefix == "bigpickle":
                 api_key = "not-needed"
             # openrouter is known to litellm natively — keep the prefix
             if prefix == "openrouter":
@@ -168,11 +178,20 @@ def _call_llm(
         full_messages.append({"role": "user", "content": "Continue."})
 
     # ── Build kwargs ───────────────────────────────────────────────────
+    _mt = max_tokens or (128 if tiny else (1024 if tools else 256))
+    # Reasoning models (big-pickle / DeepSeek V3) count thinking tokens
+    # against max_tokens. The chess prompt (FEN + legal moves + PGN history)
+    # can leave zero tokens for the answer if the model thinks too long.
+    # Bump to 4096 — reasoning can consume 3000+ tokens on mid-game positions,
+    # and retry correction messages make the prompt even longer each attempt.
+    if (resolved_model and "big-pickle" in resolved_model.lower()
+            and not max_tokens and _mt < 4096):
+        _mt = 4096
     kwargs = dict(
         model=resolved_model,
         messages=full_messages,
         temperature=temperature,
-        max_tokens=max_tokens or (128 if tiny else (1024 if tools else 256)),
+        max_tokens=_mt,
         timeout=timeout,
         api_base=effective_base,
         api_key=effective_key,
@@ -220,7 +239,7 @@ def _apply_reasoning(kwargs: dict, model: str, level: str) -> None:
     Providers and their reasoning mechanisms:
       - OpenRouter / OpenAI / OpenCode / DeepSeek: reasoning_effort
       - Anthropic: thinking.type + thinking.budget_tokens
-      - Ollama / DMR / others: no equivalent (silently skip)
+      - Ollama / DMR / BigPickle / others: no equivalent (silently skip)
     """
     model_lower = model.lower()
 
